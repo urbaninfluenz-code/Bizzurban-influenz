@@ -410,6 +410,13 @@ export default function App(){
     ctx.stroke();ctx.globalAlpha=1;
   },[]);
 
+  // ── Morph preview engine (declared before clearMorphFile so dep array is valid) ──
+  const teardownMorphEngine=useCallback(()=>{
+    if(morphPreviewTimerRef.current){clearInterval(morphPreviewTimerRef.current);morphPreviewTimerRef.current=null;}
+    if(morphEngineRef.current){try{morphEngineRef.current.destroy();}catch(_){};morphEngineRef.current=null;}
+    setMorphPreviewPlaying(false);setMorphPreviewMeter({peakDb:-60,rmsDb:-60});setMorphPreviewPos(0);
+  },[]);
+
   const clearMorphFile=useCallback(()=>{
     teardownMorphEngine();
     setMorphFile(null);setMorphBuffer(null);setMorphFileDuration(null);
@@ -440,13 +447,6 @@ export default function App(){
   },[showToast,drawMorphWaveform]);
 
   const handleMorphDrop=useCallback((e)=>{e.preventDefault();setIsDraggingMorph(false);const f=e.dataTransfer.files[0];if(f)handleMorphFile(f);},[handleMorphFile]);
-
-  // ── Morph preview engine ──────────────────────────────────────
-  const teardownMorphEngine=useCallback(()=>{
-    if(morphPreviewTimerRef.current){clearInterval(morphPreviewTimerRef.current);morphPreviewTimerRef.current=null;}
-    if(morphEngineRef.current){try{morphEngineRef.current.destroy();}catch(_){};morphEngineRef.current=null;}
-    setMorphPreviewPlaying(false);setMorphPreviewMeter({peakDb:-60,rmsDb:-60});setMorphPreviewPos(0);
-  },[]);
 
   useEffect(()=>{
     teardownMorphEngine();
