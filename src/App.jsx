@@ -76,6 +76,26 @@ function VerticalSlider({label,icon:Icon,value,min,max,step,onChange,displayValu
   );
 }
 
+// ── Error Boundary ────────────────────────────────────────────
+class ErrorBoundary extends React.Component{
+  constructor(p){super(p);this.state={err:null};}
+  static getDerivedStateFromError(e){return{err:e};}
+  render(){
+    if(this.state.err){
+      return(
+        <div style={{minHeight:'100vh',background:'#05050f',display:'flex',alignItems:'center',justifyContent:'center',padding:24}}>
+          <div style={{maxWidth:520,padding:28,borderRadius:16,background:'rgba(239,68,68,0.07)',border:'1px solid rgba(239,68,68,0.3)',color:'#f1f5f9'}}>
+            <p style={{color:'#f87171',fontWeight:800,fontSize:'1.1rem',margin:'0 0 12px'}}>SONIX — something went wrong</p>
+            <pre style={{color:'#94a3b8',fontSize:'0.75rem',whiteSpace:'pre-wrap',wordBreak:'break-all',margin:'0 0 16px'}}>{this.state.err?.message||String(this.state.err)}</pre>
+            <button onClick={()=>{this.setState({err:null});window.location.reload();}} style={{padding:'9px 18px',borderRadius:9,background:'rgba(239,68,68,0.18)',border:'1px solid rgba(239,68,68,0.4)',color:'#fca5a5',cursor:'pointer',fontFamily:'inherit',fontWeight:700}}>Reload app</button>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 // ── Toast ─────────────────────────────────────────────────────
 function Toast({message,color}){
   return(
@@ -96,7 +116,7 @@ function ModeTab({id,label,icon:Icon,active,onClick,color}){
 }
 
 // ── App ────────────────────────────────────────────────────────
-export default function App(){
+function App(){
   const [mode,setMode]=useState('master'); // 'master' | 'morph' | 'live'
 
   // ── Master mode state ──────────────────────────────────────
@@ -491,7 +511,7 @@ export default function App(){
   const getMorphConfig=()=>{
     if(morphPreset&&VOICE_MORPHS[morphPreset]) return VOICE_MORPHS[morphPreset];
     if(morphPrompt.trim()) return parseVoiceMorphPrompt(morphPrompt);
-    return VOICE_MORPHS.cinematic;
+    return VOICE_MORPHS.monster;
   };
 
   const handleRenderMorph=async()=>{
@@ -1166,4 +1186,9 @@ export default function App(){
       </div>
     </div>
   );
+}
+
+// ── Root export wrapped in error boundary ─────────────────────
+export default function AppWithBoundary(){
+  return <ErrorBoundary><App/></ErrorBoundary>;
 }
