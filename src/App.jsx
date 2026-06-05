@@ -139,6 +139,11 @@ export default function App(){
   const [morphOutput,setMorphOutput]=useState(null);
   const [morphOutputUrl,setMorphOutputUrl]=useState(null);
   const [morphError,setMorphError]=useState(null);
+  const [isDraggingMorph,setIsDraggingMorph]=useState(false);
+  const [morphFileDuration,setMorphFileDuration]=useState(null);
+  const [morphSourceUrl,setMorphSourceUrl]=useState(null);
+  const [morphPlaying,setMorphPlaying]=useState(false);
+  const [morphSourcePlaying,setMorphSourcePlaying]=useState(false);
 
   // ── Live Mic state ──────────────────────────────────────────
   const [liveActive,setLiveActive]=useState(false);
@@ -167,6 +172,10 @@ export default function App(){
   const posTimerRef=useRef(null);
   const outputAudioRef=useRef(null);
   const morphAudioRef=useRef(null);
+  const morphSourceAudioRef=useRef(null);
+  const morphWaveformRef=useRef(null);
+  const morphOutputCardRef=useRef(null);
+  const prevMorphSourceUrlRef=useRef(null);
   const liveRecAudioRef=useRef(null);
   const prevOutUrlRef=useRef(null);
   const prevMorphUrlRef=useRef(null);
@@ -206,12 +215,14 @@ export default function App(){
 
   // ── Auto-scroll to output ─────────────────────────────────────
   useEffect(()=>{if(outputBlob&&outputCardRef.current)setTimeout(()=>outputCardRef.current?.scrollIntoView({behavior:'smooth',block:'nearest'}),120);},[outputBlob]);
+  useEffect(()=>{if(morphOutput&&morphOutputCardRef.current)setTimeout(()=>morphOutputCardRef.current?.scrollIntoView({behavior:'smooth',block:'nearest'}),120);},[morphOutput]);
 
   // ── Cleanup ───────────────────────────────────────────────────
   useEffect(()=>()=>{
     if(posTimerRef.current)clearInterval(posTimerRef.current);
     if(prevOutUrlRef.current)URL.revokeObjectURL(prevOutUrlRef.current);
     if(prevMorphUrlRef.current)URL.revokeObjectURL(prevMorphUrlRef.current);
+    if(prevMorphSourceUrlRef.current)URL.revokeObjectURL(prevMorphSourceUrlRef.current);
     if(engineRef.current)try{engineRef.current.destroy();}catch(_){}
     if(liveEngineRef.current)try{liveEngineRef.current.destroy();}catch(_){}
     if(toastRef.current)clearTimeout(toastRef.current);
@@ -367,17 +378,53 @@ export default function App(){
   };
 
   // ── Voice Morph ───────────────────────────────────────────────
+  const drawMorphWaveform=useCallback((buf)=>{
+    const canvas=morphWaveformRef.current;
+    if(!canvas||!buf)return;
+    const d=buf.getChannelData(0),ctx=canvas.getContext('2d');
+    const W=canvas.width,H=canvas.height;
+    ctx.clearRect(0,0,W,H);
+    const amp=H/2;
+    ctx.strokeStyle='rgba(255,255,255,0.04)';ctx.lineWidth=1;
+    ctx.beginPath();ctx.moveTo(0,amp);ctx.lineTo(W,amp);ctx.stroke();
+    const g=ctx.createLinearGradient(0,0,W,0);
+    g.addColorStop(0,'#22d3ee');g.addColorStop(0.5,'#a855f7');g.addColorStop(1,'#67e8f9');
+    ctx.strokeStyle=g;ctx.lineWidth=1.4;ctx.globalAlpha=0.9;
+    const step=Math.max(1,Math.floor(d.length/W));
+    ctx.beginPath();
+    for(let i=0;i<W;i++){let mn=1,mx=-1;for(let j=0;j<step;j++){const v=d[i*step+j]||0;if(v<mn)mn=v;if(v>mx)mx=v;}ctx.moveTo(i,(1+mn)*amp);ctx.lineTo(i,(1+mx)*amp);}
+    ctx.stroke();ctx.globalAlpha=1;
+  },[]);
+
+  const clearMorphFile=useCallback(()=>{
+    setMorphFile(null);setMorphBuffer(null);setMorphFileDuration(null);
+    setMorphOutput(null);setMorphOutputUrl(null);setMorphError(null);
+    setMorphPlaying(false);setMorphSourcePlaying(false);
+    if(prevMorphUrlRef.current){URL.revokeObjectURL(prevMorphUrlRef.current);prevMorphUrlRef.current=null;}
+    if(prevMorphSourceUrlRef.current){URL.revokeObjectURL(prevMorphSourceUrlRef.current);prevMorphSourceUrlRef.current=null;}
+    setMorphSourceUrl(null);
+  },[]);
+
   const handleMorphFile=useCallback(async(f)=>{
     if(!f)return;
-    setMorphError(null);setMorphBuffer(null);
+    setMorphError(null);setMorphBuffer(null);setMorphFileDuration(null);
+    setMorphPlaying(false);setMorphSourcePlaying(false);
+    setMorphOutput(null);setMorphOutputUrl(null);
+    if(prevMorphUrlRef.current){URL.revokeObjectURL(prevMorphUrlRef.current);prevMorphUrlRef.current=null;}
+    if(prevMorphSourceUrlRef.current){URL.revokeObjectURL(prevMorphSourceUrlRef.current);prevMorphSourceUrlRef.current=null;}
+    const srcUrl=URL.createObjectURL(f);
+    prevMorphSourceUrlRef.current=srcUrl;setMorphSourceUrl(srcUrl);
     setMorphFile({name:f.name,size:(f.size/1048576).toFixed(2)});
     try{
       const buf=await decodeFile(f);
       setMorphBuffer(buf);
-      setFileInfo(prev=>({...prev,durationStr:fmtTime(buf.duration)}));
-      showToast('Audio loaded — pick a morph','#a855f7');
-    }catch(e){setMorphError('Could not decode file.');}
-  },[showToast]);
+      setMorphFileDuration(buf.duration);
+      setTimeout(()=>drawMorphWaveform(buf),30);
+      showToast('Audio loaded — pick a morph','#22d3ee');
+    }catch(e){setMorphError('Could not decode file. Try mp3, wav, m4a, flac, ogg.');}
+  },[showToast,drawMorphWaveform]);
+
+  const handleMorphDrop=useCallback((e)=>{e.preventDefault();setIsDraggingMorph(false);const f=e.dataTransfer.files[0];if(f)handleMorphFile(f);},[handleMorphFile]);
 
   const getMorphConfig=()=>{
     if(morphPreset&&VOICE_MORPHS[morphPreset]) return VOICE_MORPHS[morphPreset];
@@ -762,23 +809,52 @@ export default function App(){
         {/* ══════════════════════════════════ VOICE MORPH MODE ══════════════════════════════════ */}
         {mode==='morph'&&(
           <div className="animate-fade-in">
-            {/* Upload for morph */}
-            <div onClick={()=>morphInputRef.current?.click()} style={{borderRadius:20,border:`2px dashed ${morphBuffer?'rgba(34,211,238,0.4)':'rgba(255,255,255,0.1)'}`,background:morphBuffer?'rgba(34,211,238,0.04)':'transparent',cursor:'pointer',marginBottom:24,padding:morphBuffer?20:'44px 28px',textAlign:morphBuffer?'left':'center',transition:'all 0.2s ease'}}>
+
+            {/* Upload Zone — full drag-and-drop parity with master */}
+            <div
+              onDragOver={e=>{e.preventDefault();setIsDraggingMorph(true);}}
+              onDragLeave={()=>setIsDraggingMorph(false)}
+              onDrop={handleMorphDrop}
+              onClick={()=>!morphBuffer&&morphInputRef.current?.click()}
+              style={{borderRadius:20,border:`2px ${isDraggingMorph?'solid':'dashed'} ${isDraggingMorph?'#22d3ee':morphBuffer?'rgba(34,211,238,0.35)':'rgba(255,255,255,0.1)'}`,background:isDraggingMorph?'rgba(34,211,238,0.08)':morphBuffer?'rgba(34,211,238,0.04)':'transparent',cursor:morphBuffer?'default':'pointer',transition:'all 0.25s ease',boxShadow:isDraggingMorph?'0 0 0 1px #22d3ee,0 0 40px rgba(34,211,238,0.2)':'none',marginBottom:24}}
+            >
               <input ref={morphInputRef} type="file" accept="audio/*" style={{display:'none'}} onChange={e=>e.target.files[0]&&handleMorphFile(e.target.files[0])}/>
               {!morphBuffer?(
-                <>
-                  <div style={{width:60,height:60,borderRadius:18,margin:'0 auto 16px',background:'rgba(34,211,238,0.08)',display:'flex',alignItems:'center',justifyContent:'center'}}><Wand2 size={26} color="#67e8f9"/></div>
-                  <p style={{color:'#e2e8f0',fontWeight:600,fontSize:'1rem',margin:'0 0 6px'}}>Upload audio to transform</p>
-                  <p style={{color:'#475569',fontSize:'0.82rem',margin:0}}>Voice, music, any sound — we'll morph it into anything</p>
-                </>
-              ):(
-                <div style={{display:'flex',alignItems:'center',gap:12}}>
-                  <div style={{width:36,height:36,borderRadius:10,background:'rgba(34,211,238,0.2)',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}><Music2 size={16} color="#67e8f9"/></div>
-                  <div style={{flex:1,minWidth:0}}>
-                    <p style={{color:'#e2e8f0',fontWeight:600,fontSize:'0.9rem',margin:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{morphFile?.name}</p>
-                    <p style={{color:'#475569',fontSize:'0.72rem',margin:0}}>{morphFile?.size} MB · click to change</p>
+                <div style={{padding:'44px 28px',textAlign:'center'}}>
+                  <div style={{width:60,height:60,borderRadius:18,margin:'0 auto 16px',background:isDraggingMorph?'rgba(34,211,238,0.2)':'rgba(255,255,255,0.05)',display:'flex',alignItems:'center',justifyContent:'center',transform:isDraggingMorph?'scale(1.1)':'scale(1)',transition:'all 0.2s ease'}}>
+                    <Wand2 size={26} color={isDraggingMorph?'#67e8f9':'#475569'}/>
                   </div>
-                  <span style={{color:'#34d399',fontSize:'0.72rem',fontWeight:700}}>✓ Loaded</span>
+                  <p style={{color:'#e2e8f0',fontWeight:600,fontSize:'1rem',margin:'0 0 6px'}}>{isDraggingMorph?'Release to upload':'Drop your audio here'}</p>
+                  <p style={{color:'#475569',fontSize:'0.82rem',margin:0}}>or click to browse · voice, music, any sound · mp3, wav, m4a, flac</p>
+                </div>
+              ):(
+                <div style={{padding:20}}>
+                  <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:14,gap:8}}>
+                    <div style={{display:'flex',alignItems:'center',gap:12,minWidth:0}}>
+                      <div style={{width:36,height:36,borderRadius:10,flexShrink:0,background:'rgba(34,211,238,0.2)',display:'flex',alignItems:'center',justifyContent:'center'}}><Music2 size={16} color="#67e8f9"/></div>
+                      <div style={{minWidth:0}}>
+                        <p style={{color:'#e2e8f0',fontWeight:600,fontSize:'0.9rem',margin:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{morphFile?.name}</p>
+                        <p style={{color:'#475569',fontSize:'0.72rem',margin:0}}>{morphFile?.size} MB{morphFileDuration?` · ${fmtTime(morphFileDuration)}`:''}<span style={{color:'#22d3ee',marginLeft:8}}>· loaded</span></p>
+                      </div>
+                    </div>
+                    <div style={{display:'flex',gap:8,flexShrink:0}}>
+                      <button onClick={e=>{e.stopPropagation();morphInputRef.current?.click();}} style={{padding:'5px 10px',borderRadius:8,background:'rgba(255,255,255,0.05)',border:'1px solid rgba(255,255,255,0.1)',color:'#94a3b8',fontSize:'0.72rem',cursor:'pointer',fontFamily:'inherit',fontWeight:600,display:'flex',alignItems:'center',gap:4}}><Upload size={11}/>Change</button>
+                      <button onClick={e=>{e.stopPropagation();clearMorphFile();}} style={{width:28,height:28,borderRadius:'50%',background:'rgba(255,255,255,0.05)',border:'none',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',color:'#64748b',transition:'all 0.15s ease'}} onMouseOver={e=>{e.currentTarget.style.background='rgba(239,68,68,0.15)';e.currentTarget.style.color='#f87171';}} onMouseOut={e=>{e.currentTarget.style.background='rgba(255,255,255,0.05)';e.currentTarget.style.color='#64748b';}}><X size={14}/></button>
+                    </div>
+                  </div>
+                  {/* Waveform */}
+                  <canvas ref={morphWaveformRef} width={800} height={60} style={{width:'100%',height:60,borderRadius:10,background:'rgba(0,0,0,0.3)',display:'block'}}/>
+                  {/* Source preview player */}
+                  {morphSourceUrl&&(
+                    <div style={{display:'flex',alignItems:'center',gap:10,marginTop:10,padding:'8px 12px',borderRadius:10,background:'rgba(34,211,238,0.05)',border:'1px solid rgba(34,211,238,0.12)'}}>
+                      <button onClick={e=>{e.stopPropagation();const a=morphSourceAudioRef.current;if(!a)return;if(morphSourcePlaying){a.pause();setMorphSourcePlaying(false);}else{a.play();setMorphSourcePlaying(true);}}} style={{width:32,height:32,borderRadius:'50%',flexShrink:0,background:'rgba(34,211,238,0.15)',border:'1px solid rgba(34,211,238,0.3)',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center'}}>
+                        {morphSourcePlaying?<Pause size={13} color="#67e8f9"/>:<Play size={13} color="#67e8f9" style={{marginLeft:2}}/>}
+                      </button>
+                      <span style={{color:'#94a3b8',fontSize:'0.75rem',fontWeight:500,flex:1}}>Preview original · before transform</span>
+                      <span style={{color:'#334155',fontSize:'0.65rem'}}>Space plays master</span>
+                      <audio ref={morphSourceAudioRef} src={morphSourceUrl} onEnded={()=>setMorphSourcePlaying(false)} style={{display:'none'}}/>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -789,7 +865,7 @@ export default function App(){
               {Object.entries(VOICE_MORPHS).map(([id,m])=>{
                 const active=morphPreset===id;
                 return(
-                  <button key={id} onClick={()=>{setMorphPreset(active?null:id);showToast(active?'Morph deselected':`${m.emoji} ${m.name} selected`,'#22d3ee');}} className="lift" style={{padding:'12px 10px',borderRadius:14,border:`1.5px solid ${active?'rgba(34,211,238,0.55)':'rgba(255,255,255,0.07)'}`,background:active?'rgba(34,211,238,0.1)':'rgba(255,255,255,0.02)',cursor:'pointer',fontFamily:'inherit',textAlign:'center',transition:'all 0.2s ease',boxShadow:active?'0 0 20px rgba(34,211,238,0.2)':'none'}}>
+                  <button key={id} onClick={()=>{setMorphPreset(active?null:id);if(!active)setMorphPrompt('');showToast(active?'Morph deselected':`${m.emoji} ${m.name} selected`,'#22d3ee');}} className="lift" style={{padding:'12px 10px',borderRadius:14,border:`1.5px solid ${active?'rgba(34,211,238,0.55)':'rgba(255,255,255,0.07)'}`,background:active?'rgba(34,211,238,0.1)':'rgba(255,255,255,0.02)',cursor:'pointer',fontFamily:'inherit',textAlign:'center',transition:'all 0.2s ease',boxShadow:active?'0 0 20px rgba(34,211,238,0.2)':'none'}}>
                     <div style={{fontSize:'1.6rem',marginBottom:6}}>{m.emoji}</div>
                     <p style={{color:active?'#67e8f9':'#cbd5e1',fontWeight:700,fontSize:'0.78rem',margin:'0 0 3px'}}>{m.name}</p>
                     <p style={{color:'#64748b',fontSize:'0.65rem',margin:0,lineHeight:1.3}}>{m.desc}</p>
@@ -798,7 +874,7 @@ export default function App(){
               })}
             </div>
 
-            {/* OR custom prompt */}
+            {/* Custom prompt */}
             <div className="glass" style={{padding:18,marginBottom:20}}>
               <p style={{color:'#94a3b8',fontSize:'0.72rem',fontWeight:700,letterSpacing:'0.12em',textTransform:'uppercase',marginBottom:10,display:'flex',alignItems:'center',gap:8}}><Sparkles size={12}/>Or describe any sound imaginable</p>
               <textarea value={morphPrompt} onChange={e=>{setMorphPrompt(e.target.value);if(e.target.value.trim())setMorphPreset(null);}} placeholder='"Monster alien with deep cave reverb" · "Helium robot on the moon" · "Car engine underwater" · "Neon electric demon"' rows={2} style={{width:'100%',padding:'12px 14px',borderRadius:12,background:'rgba(0,0,0,0.25)',border:'1.5px solid rgba(34,211,238,0.2)',color:'#e2e8f0',fontSize:'0.85rem',outline:'none',resize:'vertical',fontFamily:'inherit',boxSizing:'border-box'}}/>
@@ -808,7 +884,7 @@ export default function App(){
             {/* Morph error */}
             {morphError&&<div className="animate-fade-in" style={{marginBottom:16,padding:'12px 16px',borderRadius:12,background:'rgba(239,68,68,0.08)',border:'1px solid rgba(239,68,68,0.25)',color:'#fca5a5',fontSize:'0.85rem',display:'flex',alignItems:'center',gap:10}}><span style={{flex:1}}>{morphError}</span><button onClick={()=>setMorphError(null)} style={{background:'none',border:'none',color:'#f87171',cursor:'pointer'}}><X size={14}/></button></div>}
 
-            {/* Transform button */}
+            {/* Transform button / progress */}
             <div style={{marginBottom:24}}>
               {morphProcessing?(
                 <div className="glass" style={{padding:18}}>
@@ -822,29 +898,37 @@ export default function App(){
                   </div>
                 </div>
               ):(
-                <button onClick={handleRenderMorph} disabled={!morphBuffer} style={{width:'100%',padding:'16px 20px',borderRadius:16,border:'none',cursor:morphBuffer?'pointer':'not-allowed',background:morphBuffer?'linear-gradient(135deg,#22d3ee 0%,#a855f7 100%)':'rgba(255,255,255,0.05)',color:morphBuffer?'#fff':'#334155',fontFamily:'inherit',fontWeight:700,fontSize:'1rem',display:'flex',flexDirection:'column',alignItems:'center',gap:4,boxShadow:morphBuffer?'0 0 28px rgba(34,211,238,0.3)':'none',transition:'all 0.2s ease'}}>
+                <button onClick={handleRenderMorph} disabled={!morphBuffer} className={morphBuffer?'btn-process':''} style={{width:'100%',padding:'16px 20px',borderRadius:16,border:'none',cursor:morphBuffer?'pointer':'not-allowed',background:morphBuffer?'linear-gradient(135deg,#22d3ee 0%,#a855f7 100%)':'rgba(255,255,255,0.05)',color:morphBuffer?'#fff':'#334155',fontFamily:'inherit',fontWeight:700,fontSize:'1rem',display:'flex',flexDirection:'column',alignItems:'center',gap:4,boxShadow:morphBuffer?'0 0 28px rgba(34,211,238,0.3)':'none',transition:'all 0.2s ease'}}>
                   <span style={{display:'flex',alignItems:'center',gap:10}}><Wand2 size={18}/>{morphBuffer?'Transform Voice':'Upload audio first'}{morphBuffer&&<ChevronRight size={18}/>}</span>
-                  {morphBuffer&&<span style={{fontSize:'0.72rem',fontWeight:500,opacity:0.85}}>{morphPreset?VOICE_MORPHS[morphPreset]?.name:morphPrompt.trim()?'Custom prompt':'Select a morph above'} · −14 LUFS normalized</span>}
+                  {morphBuffer&&<span style={{fontSize:'0.72rem',fontWeight:500,opacity:0.85}}>{morphPreset?VOICE_MORPHS[morphPreset]?.name:morphPrompt.trim()?'Custom prompt':'Select a morph above'} · −14 LUFS normalized · TPDF dithered</span>}
                 </button>
               )}
             </div>
 
             {/* Morph output */}
             {morphOutput&&morphOutputUrl&&!morphProcessing&&(
-              <div className="glass animate-fade-in" style={{padding:22,border:'1.5px solid rgba(34,211,238,0.25)',background:'rgba(34,211,238,0.04)'}}>
+              <div ref={morphOutputCardRef} className="glass animate-fade-in" style={{padding:22,border:'1.5px solid rgba(34,211,238,0.25)',background:'rgba(34,211,238,0.04)'}}>
                 <div style={{display:'flex',alignItems:'center',gap:12,marginBottom:16}}>
                   <div style={{width:40,height:40,borderRadius:12,background:'rgba(34,211,238,0.15)',display:'flex',alignItems:'center',justifyContent:'center'}}><CheckCircle2 size={20} color="#67e8f9"/></div>
                   <div>
                     <p style={{color:'#67e8f9',fontWeight:700,fontSize:'0.95rem',margin:0}}>Transform Complete</p>
-                    <p style={{color:'#64748b',fontSize:'0.78rem',margin:'2px 0 0'}}>{morphPreset?`${VOICE_MORPHS[morphPreset]?.emoji} ${VOICE_MORPHS[morphPreset]?.name}`:'Custom prompt'} · −14 LUFS</p>
+                    <p style={{color:'#64748b',fontSize:'0.78rem',margin:'2px 0 0'}}>{morphPreset?`${VOICE_MORPHS[morphPreset]?.emoji} ${VOICE_MORPHS[morphPreset]?.name}`:'Custom prompt'} · −14 LUFS · TPDF dithered 16-bit WAV</p>
                   </div>
                 </div>
                 <div style={{display:'flex',alignItems:'center',gap:12,padding:'12px 16px',borderRadius:12,background:'rgba(0,0,0,0.25)',marginBottom:14}}>
-                  <button onClick={()=>{if(!morphAudioRef.current)return;if(morphAudioRef.current.paused)morphAudioRef.current.play();else morphAudioRef.current.pause();}} style={{width:38,height:38,borderRadius:'50%',background:'rgba(34,211,238,0.15)',border:'1px solid rgba(34,211,238,0.3)',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center'}}><Play size={15} color="#67e8f9" style={{marginLeft:2}}/></button>
-                  <p style={{color:'#e2e8f0',flex:1,fontSize:'0.85rem',margin:0,fontWeight:500,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{(morphFile?.name?.replace(/\.[^.]+$/,'')||'audio')+'_transformed.wav'}</p>
-                  <audio ref={morphAudioRef} src={morphOutputUrl} style={{display:'none'}}/>
+                  <button onClick={()=>{const a=morphAudioRef.current;if(!a)return;if(morphPlaying){a.pause();setMorphPlaying(false);}else{a.play();setMorphPlaying(true);}}} style={{width:38,height:38,borderRadius:'50%',flexShrink:0,background:'rgba(34,211,238,0.15)',border:'1px solid rgba(34,211,238,0.3)',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center'}}>
+                    {morphPlaying?<Pause size={15} color="#67e8f9"/>:<Play size={15} color="#67e8f9" style={{marginLeft:2}}/>}
+                  </button>
+                  <div style={{flex:1,minWidth:0}}>
+                    <p style={{color:'#e2e8f0',fontWeight:500,fontSize:'0.85rem',margin:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{(morphFile?.name?.replace(/\.[^.]+$/,'')||'audio')+'_transformed.wav'}</p>
+                    <p style={{color:'#64748b',fontSize:'0.72rem',margin:0}}>WAV · 16-bit · TPDF dithered · LUFS-normalized</p>
+                  </div>
+                  <audio ref={morphAudioRef} src={morphOutputUrl} onEnded={()=>setMorphPlaying(false)} style={{display:'none'}}/>
                 </div>
-                <button onClick={handleMorphDownload} style={{width:'100%',padding:'12px 16px',borderRadius:12,background:'linear-gradient(135deg,#22d3ee,#a855f7)',border:'none',cursor:'pointer',color:'#fff',fontWeight:700,fontSize:'0.9rem',fontFamily:'inherit',display:'flex',alignItems:'center',justifyContent:'center',gap:8,boxShadow:'0 0 22px rgba(34,211,238,0.3)'}}><Download size={16}/>Download Transformed .wav</button>
+                <div style={{display:'flex',gap:10}}>
+                  <button onClick={handleMorphDownload} style={{flex:1,padding:'12px 16px',borderRadius:12,background:'linear-gradient(135deg,#22d3ee,#a855f7)',border:'none',cursor:'pointer',color:'#fff',fontWeight:700,fontSize:'0.9rem',fontFamily:'inherit',display:'flex',alignItems:'center',justifyContent:'center',gap:8,boxShadow:'0 0 22px rgba(34,211,238,0.3)'}}><Download size={16}/>Download .wav</button>
+                  <button onClick={()=>{if(morphAudioRef.current){morphAudioRef.current.pause();}setMorphPlaying(false);if(prevMorphUrlRef.current){URL.revokeObjectURL(prevMorphUrlRef.current);prevMorphUrlRef.current=null;}setMorphOutput(null);setMorphOutputUrl(null);}} style={{padding:'12px 16px',borderRadius:12,background:'rgba(255,255,255,0.05)',border:'1px solid rgba(255,255,255,0.1)',cursor:'pointer',color:'#cbd5e1',fontWeight:600,fontSize:'0.85rem',fontFamily:'inherit',display:'flex',alignItems:'center',gap:6}}><RotateCcw size={14}/>Re-transform</button>
+                </div>
               </div>
             )}
           </div>
@@ -941,8 +1025,8 @@ export default function App(){
                     <VerticalSlider label="Bass"       icon={Volume2}  value={liveBass}       min={-6} max={10} step={0.5}  onChange={setLiveBass}       displayValue={`${fmtDb(liveBass,1)} dB`}            accent="#ec4899"/>
                     <VerticalSlider label="Brightness" icon={Sparkles} value={liveBrightness} min={-6} max={8}  step={0.5}  onChange={setLiveBrightness} displayValue={`${fmtDb(liveBrightness,1)} dB`}      accent="#22d3ee"/>
                     <VerticalSlider label="Punch"      icon={Zap}      value={liveCompression}min={0}  max={1}  step={0.01} onChange={setLiveCompression}displayValue={`${Math.round(liveCompression*100)}%`} accent="#10b981"/>
-                    <VerticalSlider label="Clear"      icon={MicOff}   value={0} min={0} max={1} step={1} onChange={()=>{liveEngineRef.current?.clearMorph();setLiveMorph(null);setLivePitch(0);setLiveReverb(0.25);setLiveBass(0);setLiveBrightness(0);setLiveCompression(0.5);showToast('Effects cleared','#64748b');}} displayValue="⟳" accent="#64748b"/>
                   </div>
+                  <button onClick={()=>{liveEngineRef.current?.clearMorph();setLiveMorph(null);setLivePitch(0);setLiveReverb(0.25);setLiveBass(0);setLiveBrightness(0);setLiveCompression(0.5);showToast('All effects cleared','#64748b');}} style={{marginTop:10,width:'100%',padding:'9px 16px',borderRadius:10,background:'rgba(255,255,255,0.04)',border:'1px solid rgba(255,255,255,0.08)',color:'#64748b',fontWeight:600,fontSize:'0.78rem',fontFamily:'inherit',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',gap:7,transition:'all 0.15s ease'}} onMouseOver={e=>{e.currentTarget.style.background='rgba(255,255,255,0.08)';e.currentTarget.style.color='#cbd5e1';}} onMouseOut={e=>{e.currentTarget.style.background='rgba(255,255,255,0.04)';e.currentTarget.style.color='#64748b';}}><RotateCcw size={12}/>Clear All Effects</button>
                 </div>
 
                 {/* Recording download */}
