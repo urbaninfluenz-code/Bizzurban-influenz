@@ -160,6 +160,16 @@ export default function App(){
   const [liveCompression,setLiveCompression]=useState(0.5);
   const [livePitch,setLivePitch]=useState(0);
 
+  // ── Morph preview engine state ──────────────────────────────
+  const [morphPreviewPlaying,setMorphPreviewPlaying]=useState(false);
+  const [morphPreviewPos,setMorphPreviewPos]=useState(0);
+  const [morphPreviewMeter,setMorphPreviewMeter]=useState({peakDb:-60,rmsDb:-60});
+  const [morphRevSlider,setMorphRevSlider]=useState(0.25);
+  const [morphBassSlider,setMorphBassSlider]=useState(0);
+  const [morphBrightSlider,setMorphBrightSlider]=useState(0);
+  const [morphWarmSlider,setMorphWarmSlider]=useState(0.2);
+  const [morphPunchSlider,setMorphPunchSlider]=useState(0.5);
+
   // ── Toast ───────────────────────────────────────────────────
   const [toast,setToast]=useState(null);
   const toastRef=useRef(null);
@@ -176,6 +186,8 @@ export default function App(){
   const morphWaveformRef=useRef(null);
   const morphOutputCardRef=useRef(null);
   const prevMorphSourceUrlRef=useRef(null);
+  const morphEngineRef=useRef(null);
+  const morphPreviewTimerRef=useRef(null);
   const liveRecAudioRef=useRef(null);
   const prevOutUrlRef=useRef(null);
   const prevMorphUrlRef=useRef(null);
@@ -220,10 +232,12 @@ export default function App(){
   // ── Cleanup ───────────────────────────────────────────────────
   useEffect(()=>()=>{
     if(posTimerRef.current)clearInterval(posTimerRef.current);
+    if(morphPreviewTimerRef.current)clearInterval(morphPreviewTimerRef.current);
     if(prevOutUrlRef.current)URL.revokeObjectURL(prevOutUrlRef.current);
     if(prevMorphUrlRef.current)URL.revokeObjectURL(prevMorphUrlRef.current);
     if(prevMorphSourceUrlRef.current)URL.revokeObjectURL(prevMorphSourceUrlRef.current);
     if(engineRef.current)try{engineRef.current.destroy();}catch(_){}
+    if(morphEngineRef.current)try{morphEngineRef.current.destroy();}catch(_){}
     if(liveEngineRef.current)try{liveEngineRef.current.destroy();}catch(_){}
     if(toastRef.current)clearTimeout(toastRef.current);
   },[]);
@@ -397,13 +411,14 @@ export default function App(){
   },[]);
 
   const clearMorphFile=useCallback(()=>{
+    teardownMorphEngine();
     setMorphFile(null);setMorphBuffer(null);setMorphFileDuration(null);
     setMorphOutput(null);setMorphOutputUrl(null);setMorphError(null);
     setMorphPlaying(false);setMorphSourcePlaying(false);
     if(prevMorphUrlRef.current){URL.revokeObjectURL(prevMorphUrlRef.current);prevMorphUrlRef.current=null;}
     if(prevMorphSourceUrlRef.current){URL.revokeObjectURL(prevMorphSourceUrlRef.current);prevMorphSourceUrlRef.current=null;}
     setMorphSourceUrl(null);
-  },[]);
+  },[teardownMorphEngine]);
 
   const handleMorphFile=useCallback(async(f)=>{
     if(!f)return;
@@ -425,6 +440,53 @@ export default function App(){
   },[showToast,drawMorphWaveform]);
 
   const handleMorphDrop=useCallback((e)=>{e.preventDefault();setIsDraggingMorph(false);const f=e.dataTransfer.files[0];if(f)handleMorphFile(f);},[handleMorphFile]);
+
+  // ── Morph preview engine ──────────────────────────────────────
+  const teardownMorphEngine=useCallback(()=>{
+    if(morphPreviewTimerRef.current){clearInterval(morphPreviewTimerRef.current);morphPreviewTimerRef.current=null;}
+    if(morphEngineRef.current){try{morphEngineRef.current.destroy();}catch(_){};morphEngineRef.current=null;}
+    setMorphPreviewPlaying(false);setMorphPreviewMeter({peakDb:-60,rmsDb:-60});setMorphPreviewPos(0);
+  },[]);
+
+  useEffect(()=>{
+    teardownMorphEngine();
+    if(!morphBuffer)return;
+    const eng=buildRealtimeEngine(morphBuffer);
+    morphEngineRef.current=eng;
+    eng.onMeter(m=>setMorphPreviewMeter(m));
+    eng.setReverb(0.25);eng.setBass(0);eng.setBrightness(0);eng.setWarmth(0.2);eng.setCompression(0.5);
+  },[morphBuffer,teardownMorphEngine]);
+
+  useEffect(()=>{if(mode!=='morph')teardownMorphEngine();},[mode,teardownMorphEngine]);
+
+  useEffect(()=>{morphEngineRef.current?.setReverb(morphRevSlider);},[morphRevSlider]);
+  useEffect(()=>{morphEngineRef.current?.setBass(morphBassSlider);},[morphBassSlider]);
+  useEffect(()=>{morphEngineRef.current?.setBrightness(morphBrightSlider);},[morphBrightSlider]);
+  useEffect(()=>{morphEngineRef.current?.setWarmth(morphWarmSlider);},[morphWarmSlider]);
+  useEffect(()=>{morphEngineRef.current?.setCompression(morphPunchSlider);},[morphPunchSlider]);
+
+  const toggleMorphPreview=async()=>{
+    if(!morphEngineRef.current)return;
+    if(morphPreviewPlaying){
+      morphEngineRef.current.pause();setMorphPreviewPlaying(false);
+      if(morphPreviewTimerRef.current){clearInterval(morphPreviewTimerRef.current);morphPreviewTimerRef.current=null;}
+    }else{
+      try{await morphEngineRef.current.play();}catch(e){console.error(e);return;}
+      setMorphPreviewPlaying(true);
+      morphPreviewTimerRef.current=setInterval(()=>{
+        const t=morphEngineRef.current?morphEngineRef.current.getTime():0;
+        setMorphPreviewPos(t);
+        if(morphEngineRef.current&&!morphEngineRef.current.isPlaying()){
+          setMorphPreviewPlaying(false);clearInterval(morphPreviewTimerRef.current);morphPreviewTimerRef.current=null;
+          setMorphPreviewPos(0);
+        }
+      },60);
+    }
+  };
+
+  const handleMorphPreviewSeek=(e)=>{
+    const p=parseFloat(e.target.value);setMorphPreviewPos(p);morphEngineRef.current?.seek(p);
+  };
 
   const getMorphConfig=()=>{
     if(morphPreset&&VOICE_MORPHS[morphPreset]) return VOICE_MORPHS[morphPreset];
@@ -858,6 +920,56 @@ export default function App(){
                 </div>
               )}
             </div>
+
+            {/* ── Real-time preview & shape ── */}
+            {morphBuffer&&(
+              <div className="glass animate-fade-in" style={{padding:20,marginBottom:24}}>
+                <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:16,flexWrap:'wrap',gap:8}}>
+                  <p style={{color:'#94a3b8',fontSize:'0.72rem',fontWeight:700,letterSpacing:'0.12em',textTransform:'uppercase',margin:0,display:'flex',alignItems:'center',gap:8}}><Activity size={12}/>Real-time preview &amp; shape</p>
+                  <span style={{fontSize:'0.68rem',fontWeight:600,padding:'3px 10px',borderRadius:999,background:'rgba(34,211,238,0.1)',color:'#67e8f9',border:'1px solid rgba(34,211,238,0.25)'}}>Source · live effects</span>
+                </div>
+
+                {/* Transport */}
+                <div style={{display:'flex',alignItems:'center',gap:14,marginBottom:14}}>
+                  <button onClick={toggleMorphPreview} className={morphPreviewPlaying?'animate-pulse-ring':''} style={{width:50,height:50,borderRadius:'50%',flexShrink:0,background:'linear-gradient(135deg,#22d3ee,#a855f7)',border:'none',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',color:'#fff',boxShadow:'0 0 22px rgba(34,211,238,0.4)',transition:'all 0.2s ease'}}>
+                    {morphPreviewPlaying?<Pause size={20}/>:<Play size={20} style={{marginLeft:3}}/>}
+                  </button>
+                  <div style={{flex:1,minWidth:0}}>
+                    <input type="range" min={0} max={morphBuffer.duration} step={0.05} value={morphPreviewPos} onChange={handleMorphPreviewSeek} style={{width:'100%',cursor:'pointer'}}/>
+                    <div style={{display:'flex',justifyContent:'space-between',marginTop:4}}>
+                      <span className="mono" style={{color:'#64748b',fontSize:'0.72rem'}}>{fmtTime(morphPreviewPos)}</span>
+                      <span className="mono" style={{color:'#64748b',fontSize:'0.72rem'}}>{fmtTime(morphBuffer.duration)}</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* VU Meter */}
+                <div style={{display:'flex',alignItems:'center',gap:14,marginBottom:18}}>
+                  <div style={{flex:1}}>
+                    <div className="meter-track">
+                      <div className="meter-fill" style={{width:`${Math.max(0,Math.min(100,(morphPreviewMeter.peakDb+60)/60*100))}%`}}/>
+                    </div>
+                    <div style={{display:'flex',justifyContent:'space-between',marginTop:4}}>
+                      {['-60','-30','-12','-3','0 dB'].map(l=><span key={l} className="mono" style={{color:'#475569',fontSize:'0.66rem'}}>{l}</span>)}
+                    </div>
+                  </div>
+                  <div style={{textAlign:'right',minWidth:90}}>
+                    <p className="mono" style={{color:morphPreviewMeter.peakDb>-3?'#ef4444':'#f1f5f9',fontSize:'1.3rem',fontWeight:700,margin:0,lineHeight:1,transition:'color 0.1s ease',textShadow:morphPreviewMeter.peakDb>-3?'0 0 12px rgba(239,68,68,0.6)':'none'}}>{fmtDb(morphPreviewMeter.peakDb)} dB</p>
+                    <p style={{color:morphPreviewMeter.peakDb>-3?'#ef4444':'#64748b',fontSize:'0.66rem',margin:'2px 0 0',fontWeight:600,transition:'color 0.1s ease'}}>{morphPreviewMeter.peakDb>-3?'Clipping!':'Live peak'}</p>
+                  </div>
+                </div>
+
+                {/* Live sliders — shape the source before transforming */}
+                <div className="slider-grid" style={{padding:'12px 6px',background:'rgba(0,0,0,0.2)',borderRadius:14}}>
+                  <VerticalSlider label="Reverb"     icon={Waves}    value={morphRevSlider}   min={0}  max={1}  step={0.01} onChange={setMorphRevSlider}   displayValue={`${Math.round(morphRevSlider*100)}%`}    accent="#a855f7"/>
+                  <VerticalSlider label="Bass"       icon={Volume2}  value={morphBassSlider}  min={-6} max={10} step={0.5}  onChange={setMorphBassSlider}  displayValue={`${fmtDb(morphBassSlider,1)} dB`}        accent="#ec4899"/>
+                  <VerticalSlider label="Brightness" icon={Sparkles} value={morphBrightSlider}min={-6} max={8}  step={0.5}  onChange={setMorphBrightSlider}displayValue={`${fmtDb(morphBrightSlider,1)} dB`}      accent="#22d3ee"/>
+                  <VerticalSlider label="Warmth"     icon={Film}     value={morphWarmSlider}  min={0}  max={1}  step={0.01} onChange={setMorphWarmSlider}  displayValue={`${Math.round(morphWarmSlider*100)}%`}   accent="#f59e0b"/>
+                  <VerticalSlider label="Punch"      icon={Zap}      value={morphPunchSlider} min={0}  max={1}  step={0.01} onChange={setMorphPunchSlider} displayValue={`${Math.round(morphPunchSlider*100)}%`}  accent="#10b981"/>
+                </div>
+                <p style={{color:'#334155',fontSize:'0.68rem',margin:'8px 0 0',textAlign:'center'}}>Live-shapes source audio · pick a morph below then hit Transform</p>
+              </div>
+            )}
 
             {/* Morph preset grid */}
             <p style={{color:'#94a3b8',fontSize:'0.72rem',fontWeight:700,letterSpacing:'0.12em',textTransform:'uppercase',marginBottom:12,display:'flex',alignItems:'center',gap:8}}><Wand2 size={12}/>Choose a voice morph</p>
