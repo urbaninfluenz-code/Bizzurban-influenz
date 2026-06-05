@@ -12,14 +12,19 @@
 //   • Real-time preview engine + live mic engine with AudioWorklet pitch shifter
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PLATFORM TARGETS
+// PLATFORM TARGETS — based on official loudness specifications
 // ─────────────────────────────────────────────────────────────────────────────
 export const PLATFORM_TARGETS = {
-  instagram: { lufs: -14, peak: -1.0, label: 'Instagram / Reels' },
-  tiktok:    { lufs: -14, peak: -1.0, label: 'TikTok' },
-  youtube:   { lufs: -14, peak: -1.0, label: 'YouTube' },
-  phone:     { lufs: -12, peak: -1.0, label: 'Phone Speaker' },
-  broadcast: { lufs: -23, peak: -2.0, label: 'Broadcast (EBU R128)' },
+  spotify:   { lufs:-14, peak:-1.0, label:'Spotify' },
+  apple:     { lufs:-16, peak:-1.0, label:'Apple Music' },
+  youtube:   { lufs:-14, peak:-1.0, label:'YouTube' },
+  tidal:     { lufs:-14, peak:-1.0, label:'Tidal' },
+  amazon:    { lufs:-14, peak:-2.0, label:'Amazon Music' },
+  instagram: { lufs:-14, peak:-1.0, label:'Instagram / Reels' },
+  tiktok:    { lufs:-14, peak:-1.0, label:'TikTok' },
+  phone:     { lufs:-12, peak:-1.0, label:'Phone Speaker' },
+  cd:        { lufs:-9,  peak:-0.3, label:'CD Master' },
+  broadcast: { lufs:-23, peak:-2.0, label:'Broadcast (EBU R128)' },
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -68,6 +73,30 @@ export const PRESETS = {
     rev:  { dur:2.5, decay:2.2, room:0.65, maxWet:0.28, pre:0.018 },
     name: 'Auto Magic', desc: 'Analyzes your audio and picks the best settings',
   },
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GENRE EQ CURVES — David Gibson "The Art of Mixing" genre-specific signatures
+// Values are dB adjustment per frequency band applied on top of preset EQ
+// Bands: sub(<40Hz) | bass(40-100Hz) | loMid(100-800Hz, "ooh zone") |
+//        mid(800-5kHz, presence/irritation) | pres(5-8kHz) | air(>8kHz)
+// ─────────────────────────────────────────────────────────────────────────────
+export const GENRE_CURVES = {
+  auto:       { name:'Auto',          emoji:'🎯', sub:0,  bass:0,  loMid:0,  mid:0,  pres:0,  air:0  },
+  pop:        { name:'Pop',           emoji:'🎵', sub:1,  bass:2,  loMid:-1, mid:0,  pres:2,  air:2  },
+  rock:       { name:'Rock',          emoji:'🎸', sub:2,  bass:3,  loMid:-2, mid:1,  pres:2,  air:1  },
+  metal:      { name:'Metal',         emoji:'🤘', sub:2,  bass:1,  loMid:-3, mid:4,  pres:3,  air:-1 },
+  hip_hop:    { name:'Hip-Hop',       emoji:'🎤', sub:5,  bass:3,  loMid:-2, mid:0,  pres:1,  air:2  },
+  rnb:        { name:'R&B',           emoji:'💜', sub:3,  bass:3,  loMid:-1, mid:0,  pres:2,  air:2  },
+  jazz:       { name:'Jazz',          emoji:'🎷', sub:0,  bass:1,  loMid:0,  mid:0,  pres:0,  air:1  },
+  classical:  { name:'Classical',     emoji:'🎻', sub:0,  bass:1,  loMid:0,  mid:-1, pres:0,  air:2  },
+  country:    { name:'Country',       emoji:'🤠', sub:-1, bass:1,  loMid:-1, mid:1,  pres:3,  air:2  },
+  electronic: { name:'Electronic',    emoji:'⚡', sub:4,  bass:3,  loMid:-2, mid:0,  pres:1,  air:4  },
+  gospel:     { name:'Gospel',        emoji:'✨', sub:2,  bass:3,  loMid:0,  mid:1,  pres:3,  air:2  },
+  acoustic:   { name:'Acoustic',      emoji:'🪕', sub:-2, bass:1,  loMid:-2, mid:0,  pres:2,  air:3  },
+  podcast:    { name:'Podcast/Voice', emoji:'🎙', sub:-5, bass:-3, loMid:-4, mid:2,  pres:4,  air:1  },
+  film:       { name:'Film Score',    emoji:'🎬', sub:3,  bass:4,  loMid:-1, mid:0,  pres:2,  air:3  },
+  new_age:    { name:'New Age',       emoji:'🌊', sub:-1, bass:0,  loMid:-2, mid:-1, pres:1,  air:4  },
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -516,7 +545,174 @@ function clamp(v,lo,hi){return Math.max(lo,Math.min(hi,v));}
 async function safeKWeighted(buf){try{return await kWeightedRender(buf);}catch(_){return buf;}}
 
 // ─────────────────────────────────────────────────────────────────────────────
+// NOISE GATE (sample-level, in-place)
+// Gibson: set threshold between signal and noise floor to eradicate bleed
+// Attack fast (5ms), release moderate (80ms) to preserve natural transients
+// ─────────────────────────────────────────────────────────────────────────────
+function applyNoiseGate(buf, thresholdDb, attackMs=5, releaseMs=80) {
+  const sr=buf.sampleRate;
+  const thresh=Math.pow(10, Math.min(-20, thresholdDb)/20);
+  const attC=Math.exp(-1/Math.max(1, attackMs/1000*sr));
+  const relC=Math.exp(-1/Math.max(1, releaseMs/1000*sr));
+  const numCh=buf.numberOfChannels;
+  const ch=[];
+  for(let c=0;c<numCh;c++) ch.push(buf.getChannelData(c));
+  const len=buf.length;
+  let env=0, gain=0;
+  for(let i=0;i<len;i++){
+    let peak=0;
+    for(let c=0;c<numCh;c++){const v=Math.abs(ch[c][i]);if(v>peak)peak=v;}
+    env=peak>env ? attC*env+(1-attC)*peak : relC*env+(1-relC)*peak;
+    const tgt=env>thresh?1.0:0.0;
+    gain=tgt>gain ? attC*gain+(1-attC)*tgt : relC*gain+(1-relC)*tgt;
+    for(let c=0;c<numCh;c++) ch[c][i]*=gain;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PER-BAND COMPRESSOR (sample-level)
+// ─────────────────────────────────────────────────────────────────────────────
+function compressBand(data, sr, thresholdDb, ratio, attackMs, releaseMs) {
+  const thresh=Math.pow(10, thresholdDb/20);
+  const attC=Math.exp(-1/Math.max(1, attackMs/1000*sr));
+  const relC=Math.exp(-1/Math.max(1, releaseMs/1000*sr));
+  let env=0;
+  for(let i=0;i<data.length;i++){
+    const abs=Math.abs(data[i]);
+    env=abs>env ? attC*env+(1-attC)*abs : relC*env+(1-relC)*abs;
+    if(env>thresh){
+      const gr=Math.pow(thresh/env, 1-1/ratio);
+      data[i]*=gr;
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MULTIBAND COMPRESSOR (sample-level, 3-band: bass/mids/highs)
+// Gibson: separate compression per frequency band handles masking and balances
+// tonal density. Bass band: heavier/slower. Highs: lighter/faster.
+// ─────────────────────────────────────────────────────────────────────────────
+function applyMultibandComp(buf, sr, cfg) {
+  const len=buf.length;
+  const numCh=buf.numberOfChannels;
+  const k1=Math.exp(-2*Math.PI*250/sr);   // bass/mid crossover 250Hz
+  const k2=Math.exp(-2*Math.PI*4500/sr);  // mid/high crossover 4.5kHz
+  for(let c=0;c<numCh;c++){
+    const d=buf.getChannelData(c);
+    const bass=new Float32Array(len);
+    const mids=new Float32Array(len);
+    const highs=new Float32Array(len);
+    let lp1=0, lp2=0;
+    for(let i=0;i<len;i++){
+      lp1=k1*lp1+(1-k1)*d[i];
+      lp2=k2*lp2+(1-k2)*d[i];
+      bass[i]=lp1;
+      mids[i]=lp2-lp1;
+      highs[i]=d[i]-lp2;
+    }
+    compressBand(bass,  sr, cfg.bass.threshold,  cfg.bass.ratio,  cfg.bass.attackMs,  cfg.bass.releaseMs);
+    compressBand(mids,  sr, cfg.mids.threshold,  cfg.mids.ratio,  cfg.mids.attackMs,  cfg.mids.releaseMs);
+    compressBand(highs, sr, cfg.highs.threshold, cfg.highs.ratio, cfg.highs.attackMs, cfg.highs.releaseMs);
+    for(let i=0;i<len;i++) d[i]=bass[i]+mids[i]+highs[i];
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// STEREO FATTENER — Haas effect via dual short delays (Gibson: 12-18ms)
+// Creates stereo width and presence without pitch shift. Used for fattening
+// vocals, guitars, and snare. Panned L/R for wide image.
+// ─────────────────────────────────────────────────────────────────────────────
+function buildStereoFattener(ctx, delay1=0.012, delay2=0.018, wet=0.20) {
+  const input=ctx.createGain(); input.gain.value=1.0;
+  const del1=ctx.createDelay(0.1); del1.delayTime.value=delay1;
+  const del2=ctx.createDelay(0.1); del2.delayTime.value=delay2;
+  const panL=ctx.createStereoPanner(); panL.pan.value=-0.60;
+  const panR=ctx.createStereoPanner(); panR.pan.value=+0.60;
+  const wG1=ctx.createGain(); wG1.gain.value=wet;
+  const wG2=ctx.createGain(); wG2.gain.value=wet;
+  const dryG=ctx.createGain(); dryG.gain.value=1.0;
+  const mix=ctx.createGain();
+  input.connect(dryG); dryG.connect(mix);
+  input.connect(del1); del1.connect(panL); panL.connect(wG1); wG1.connect(mix);
+  input.connect(del2); del2.connect(panR); panR.connect(wG2); wG2.connect(mix);
+  return {input, output:mix};
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// EXTENDED 8-BAND EQ — Gibson's 6 frequency ranges + genre curve overlay
+// Process: cut mudd (loMid) → boost lows → cut irritation (mid) → boost highs
+// Cuts use narrow Q (1.5-2.0), boosts use wider Q (0.7-1.0)
+// ─────────────────────────────────────────────────────────────────────────────
+function buildExtendedEqChain(ctx, presetCfg, genreCurve, extras) {
+  const e=presetCfg.eq;
+  const g=genreCurve||GENRE_CURVES.auto;
+  const ex=extras||{};
+  const nodes=[];
+  const mk=(type,freq,gain,Q)=>{
+    const f=ctx.createBiquadFilter(); f.type=type;
+    if(freq!=null) f.frequency.value=freq;
+    if(gain!=null) f.gain.value=gain;
+    if(Q!=null)    f.Q.value=Q;
+    nodes.push(f); return f;
+  };
+  // HPF: removes sub-rumble below preset cutoff
+  mk('highpass', Math.max(20,e.hp), null, 0.7);
+  // Sub-bass shelf (<40Hz): boost for hip-hop/electronic, cut for voice
+  mk('lowshelf', 40, clamp(g.sub||0,-8,8), null);
+  // Bass shelf (40-100Hz): warmth and body
+  mk('lowshelf', e.lowShelfHz, clamp(e.lowShelfDb+(g.bass||0)+(ex.bassBoost||0),-6,12), null);
+  // Low-mid peak (100-800Hz "ooh zone"): narrow Q=1.8 for cuts to remove muddiness
+  const loMidGain=clamp(e.lowMidDb+(g.loMid||0),-12,4);
+  mk('peaking', e.lowMidHz, loMidGain, loMidGain<0?1.8:1.0);
+  // Mid peak (800-5kHz): presence/irritation zone
+  const midGain=clamp(e.midDb+(g.mid||0),-8,6);
+  mk('peaking', e.midHz, midGain, midGain<0?1.8:1.0);
+  // Presence peak (5-8kHz): definition and attack
+  mk('peaking', e.presHz, clamp(e.presDb+(g.pres||0),-6,8), 1.0);
+  // Air shelf (>8kHz): shimmer and sparkle
+  mk('highshelf', e.airHz, clamp(e.airDb+(g.air||0)+(ex.brightness||0),-6,8), null);
+  // LPF: remove harsh ultrasonic content
+  mk('lowpass', e.lp, null, 0.5);
+  for(let i=0;i<nodes.length-1;i++) nodes[i].connect(nodes[i+1]);
+  return {input:nodes[0], output:nodes[nodes.length-1], nodes};
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ENHANCED IR GENERATOR — frequency-dependent decay (highs die faster in rooms)
+// ─────────────────────────────────────────────────────────────────────────────
+function generateEnhancedIR(ctx, dur, decay, room, predelayMs=0) {
+  const sr=ctx.sampleRate, preSamples=Math.floor(predelayMs/1000*sr);
+  const len=Math.max(1, Math.floor(sr*dur)+preSamples);
+  const buf=ctx.createBuffer(2, len, sr);
+  for(let ch=0;ch<2;ch++){
+    const d=buf.getChannelData(ch);
+    // Predelay silence
+    for(let i=0;i<preSamples;i++) d[i]=0;
+    // Diffuse tail: two-pass random for diffusion
+    for(let i=preSamples;i<len;i++){
+      const t=(i-preSamples)/sr;
+      const envLow=Math.pow(Math.max(0,1-t/dur), decay*0.7);      // lows linger
+      const envHigh=Math.pow(Math.max(0,1-t/dur), decay*1.6);     // highs die fast
+      const noise=(Math.random()*2-1);
+      // Mix low-decay and high-decay envelopes (crude frequency-dep decay)
+      d[i]=noise*((envLow+envHigh)*0.5)*room*(ch===0?1.0:0.97);
+    }
+    // Smooth for early reflections
+    let prev=0;
+    for(let i=preSamples;i<len;i++){const c=d[i]*0.65+prev*0.35;d[i]=c;prev=c;}
+  }
+  return buf;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // RENDER MASTER
+// ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// RENDER MASTER — full "Art of Mixing" DSP chain
+// Chain: Noise Gate → NR → Extended EQ (genre+instrument) → Saturation →
+//        Parallel Compression → Stereo Fattening → Enhanced Reverb →
+//        Post-render Multiband Comp → LUFS Normalize → True-peak Limiter →
+//        TPDF Dither → 16-bit WAV
 // ─────────────────────────────────────────────────────────────────────────────
 export async function renderMaster(audioBuffer, config, onProgress){
   const prog=(p,l)=>{try{onProgress?.(p,l);}catch(_){}};
@@ -528,7 +724,11 @@ export async function renderMaster(audioBuffer, config, onProgress){
   if(pid==='auto') presetCfg=autoCustomize(presetCfg,analysis);
   if(pid==='custom') presetCfg=applyPromptToMaster(PRESETS.auto,config.customPrompt||'');
 
-  prog(12,'Trimming silence...');
+  // Genre EQ curve (Gibson's genre-specific signatures)
+  const genre=config.genre||'auto';
+  const genreCurve=GENRE_CURVES[genre]||GENRE_CURVES.auto;
+
+  prog(10,'Trimming silence...');
   let work=audioBuffer;
   if(config.autoTrim){
     const r=config.trimRange||analysis.suggestedTrim;
@@ -537,6 +737,21 @@ export async function renderMaster(audioBuffer, config, onProgress){
 
   let nr=config.noiseReduction??0.3;
   if(pid==='auto'&&presetCfg._autoNoise!=null) nr=Math.max(nr,presetCfg._autoNoise);
+
+  // ── STEP 1: Noise Gate (Gibson: threshold between signal and noise floor) ──
+  prog(15,'Applying noise gate...');
+  if(nr>0.1 && analysis.noiseFloorDb>-70){
+    const gateThreshDb=analysis.noiseFloorDb+8;
+    // Clone into new buffer for gate processing
+    const numCh=work.numberOfChannels, len=work.length, sr=work.sampleRate;
+    const Ctx=window.OfflineAudioContext||window.webkitOfflineAudioContext;
+    const go=new Ctx(numCh,len,sr);
+    const gs=go.createBufferSource(); gs.buffer=work;
+    gs.connect(go.destination); gs.start(0);
+    const gb=await go.startRendering();
+    applyNoiseGate(gb, gateThreshDb, 5, 80);
+    work=gb;
+  }
 
   const sr=work.sampleRate;
   const revTail=(presetCfg.rev.dur||0)*1.2+0.5;
@@ -547,24 +762,28 @@ export async function renderMaster(audioBuffer, config, onProgress){
   const src=oc.createBufferSource(); src.buffer=work;
   let n=src;
 
-  // Always-on rumble HPF
+  // ── STEP 2: Rumble HPF (removes infrasonic content <35Hz) ──
   const rumble=oc.createBiquadFilter(); rumble.type='highpass'; rumble.frequency.value=35; rumble.Q.value=0.7;
   n.connect(rumble); n=rumble;
 
-  // Multi-band noise reduction
+  // ── STEP 3: Multiband Noise Reduction ──
   prog(22,'Reducing noise...');
   if(nr>0.02){
     const mbNR=buildMultiBandNR(oc,analysis.noiseFloorDb,nr);
     if(mbNR){n.connect(mbNR.input);n=mbNR.output;}
   }
 
-  // EQ
-  prog(35,'Applying EQ...');
-  const eq=buildEqChain(oc,presetCfg,{bassBoost:config.bassBoost||0,brightness:config.brightness||0});
+  // ── STEP 4: Extended 8-band Parametric EQ with Genre Curve ──
+  // Gibson's step-by-step: cut loMid muddiness → boost bass → cut irritation → boost air
+  prog(32,'Shaping EQ (genre: '+genreCurve.name+')...');
+  const eq=buildExtendedEqChain(oc,presetCfg,genreCurve,{
+    bassBoost:config.bassBoost||0,
+    brightness:config.brightness||0,
+  });
   n.connect(eq.input); n=eq.output;
 
-  // Saturation
-  prog(50,'Adding warmth...');
+  // ── STEP 5: Analog Saturation (warmth, harmonic richness) ──
+  prog(44,'Adding analog warmth...');
   const wa=(config.warmth!=null?config.warmth:0.3)*(1+presetCfg.sat);
   if(wa>0.02){
     const ws=oc.createWaveShaper(); ws.curve=makeSatCurve(Math.min(1,wa)); ws.oversample='4x';
@@ -572,8 +791,9 @@ export async function renderMaster(audioBuffer, config, onProgress){
     n.connect(ws); ws.connect(trim); n=trim;
   }
 
-  // Parallel compression
-  prog(62,'Compressing dynamics...');
+  // ── STEP 6: Parallel (NY) Compression — glue + punch ──
+  // Gibson: ratio 2:1-4:1, 3-6dB gain reduction, sharper attack for presence
+  prog(54,'Parallel compression...');
   const ca=config.compression!=null?config.compression:0.5;
   const bc=presetCfg.comp;
   const comp=oc.createDynamicsCompressor();
@@ -585,36 +805,62 @@ export async function renderMaster(audioBuffer, config, onProgress){
   n.connect(cDry); n.connect(comp); comp.connect(cWet); cDry.connect(cMix); cWet.connect(cMix);
   n=cMix;
 
-  // Reverb (parallel)
-  prog(75,'Rendering reverb space...');
+  // ── STEP 7: Stereo Fattening (Gibson: 12-18ms Haas effect for width/presence) ──
+  if(channels>1){
+    const fat=buildStereoFattener(oc, 0.012, 0.018, 0.18);
+    n.connect(fat.input); n=fat.output;
+  }
+
+  // ── STEP 8: Enhanced Reverb with Predelay (Gibson: 30-100ms pre for separation) ──
+  prog(64,'Rendering reverb space...');
   const rv=presetCfg.rev, ra=config.reverbAmount!=null?config.reverbAmount:0.3;
   const wv=Math.max(0,Math.min(1,rv.maxWet*ra));
   if(wv>0.005){
-    const pre=oc.createDelay(0.2); pre.delayTime.value=rv.pre;
-    const conv=oc.createConvolver(); conv.buffer=generateIR(oc,rv.dur,rv.decay,rv.room);
+    const predelayMs=(rv.pre||0.018)*1000;
+    const conv=oc.createConvolver();
+    conv.buffer=generateEnhancedIR(oc, rv.dur, rv.decay, rv.room, predelayMs);
     const dryG=oc.createGain(); dryG.gain.value=1.0;
     const wetG=oc.createGain(); wetG.gain.value=wv;
     const mix=oc.createGain();
-    n.connect(dryG); n.connect(pre); pre.connect(conv); conv.connect(wetG);
+    n.connect(dryG); n.connect(conv); conv.connect(wetG);
     dryG.connect(mix); wetG.connect(mix); n=mix;
   }
 
-  // Platform tilt
-  const plt=config.platform||'instagram';
+  // ── STEP 9: Platform-optimized tilt EQ ──
+  const plt=config.platform||'spotify';
   if(plt==='phone'||pid==='phone'){
     const pb=oc.createBiquadFilter(); pb.type='peaking'; pb.frequency.value=2500; pb.Q.value=1.0; pb.gain.value=2.5;
     n.connect(pb); n=pb;
   } else if(plt==='instagram'||plt==='tiktok'){
-    const mf=oc.createBiquadFilter(); mf.type='peaking'; mf.frequency.value=1800; mf.Q.value=0.9; mf.gain.value=1.2;
+    const mf=oc.createBiquadFilter(); mf.type='peaking'; mf.frequency.value=1800; mf.Q.value=0.9; mf.gain.value=1.0;
     n.connect(mf); n=mf;
+  } else if(plt==='cd'){
+    // CD masters can have more low end and dynamics
+    const cdLow=oc.createBiquadFilter(); cdLow.type='lowshelf'; cdLow.frequency.value=80; cdLow.gain.value=1.5;
+    n.connect(cdLow); n=cdLow;
+  } else if(plt==='broadcast'){
+    // Broadcast needs tight bass, forward mids for intelligibility
+    const bcHP=oc.createBiquadFilter(); bcHP.type='highpass'; bcHP.frequency.value=80; bcHP.Q.value=0.7;
+    const bcMid=oc.createBiquadFilter(); bcMid.type='peaking'; bcMid.frequency.value=2000; bcMid.Q.value=0.9; bcMid.gain.value=1.5;
+    n.connect(bcHP); bcHP.connect(bcMid); n=bcMid;
   }
 
   n.connect(oc.destination); src.start(0);
+  prog(74,'Rendering audio engine...');
   const rendered=await oc.startRendering();
 
-  // LUFS normalize
-  prog(86,'Measuring loudness...');
-  const target=PLATFORM_TARGETS[plt]||PLATFORM_TARGETS.instagram;
+  // ── STEP 10: Post-render Multiband Compression (3-band) ──
+  // Gibson: separate compression for bass keeps low end tight and punchy
+  prog(82,'Multiband compression...');
+  applyMultibandComp(rendered, rendered.sampleRate, {
+    bass:  {threshold:-24, ratio:3.5, attackMs:20, releaseMs:150},
+    mids:  {threshold:-22, ratio:2.5, attackMs:8,  releaseMs:80 },
+    highs: {threshold:-20, ratio:2.0, attackMs:4,  releaseMs:40 },
+  });
+
+  // ── STEP 11: LUFS Normalize to platform target ──
+  prog(88,'Measuring loudness...');
+  const target=PLATFORM_TARGETS[plt]||PLATFORM_TARGETS.spotify;
   let measured=-23;
   try{const k=await kWeightedRender(rendered);measured=integratedLufsFromBuffer(k);}
   catch(_){measured=integratedLufsFromBuffer(rendered);}
@@ -622,14 +868,15 @@ export async function renderMaster(audioBuffer, config, onProgress){
   const gl=Math.pow(10,clamp(target.lufs-measured,-18,18)/20);
   for(let c=0;c<rendered.numberOfChannels;c++){const d=rendered.getChannelData(c);for(let i=0;i<d.length;i++)d[i]*=gl;}
 
-  // True-peak limiter
+  // ── STEP 12: True-peak Limiter (ceiling at platform spec, e.g. -0.3dBTP for CD) ──
   prog(94,'Applying true-peak limiter...');
-  softLookaheadLimiter(rendered,target.peak);
+  softLookaheadLimiter(rendered, target.peak);
 
   const fkBuf=await safeKWeighted(rendered);
   const fLufs=integratedLufsFromBuffer(fkBuf);
   const fPeak=truePeakDbtpFromBuffer(rendered);
 
+  // ── STEP 13: TPDF Dither + 16-bit WAV encode ──
   prog(99,'Encoding WAV (TPDF dithered)...');
   const wavAb=encodeWAV(rendered);
   prog(100,'Done');
@@ -637,6 +884,7 @@ export async function renderMaster(audioBuffer, config, onProgress){
   const blob=new Blob([wavAb],{type:'audio/wav'});
   blob.__lufs=Number.isFinite(fLufs)?fLufs:target.lufs;
   blob.__peak=fPeak;
+  blob.__genre=genre;
   return blob;
 }
 

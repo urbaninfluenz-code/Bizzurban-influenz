@@ -8,7 +8,7 @@ import {
 import {
   decodeFile, analyzeAudio, buildRealtimeEngine, renderMaster,
   buildLiveMicEngine, PRESETS as ENGINE_PRESETS, PLATFORM_TARGETS,
-  VOICE_MORPHS, parseVoiceMorphPrompt,
+  GENRE_CURVES, VOICE_MORPHS, parseVoiceMorphPrompt,
 } from './audioProcessor.js';
 
 // ── Preset UI metadata ────────────────────────────────────────
@@ -21,9 +21,12 @@ const PRESET_META = [
   { id:'auto',      icon:Sparkles,   color:'#22d3ee', tag:'AI'     },
 ];
 const PLATFORM_META = [
-  { id:'instagram', icon:Music3,     short:'Instagram' },
-  { id:'tiktok',    icon:Activity,   short:'TikTok'    },
+  { id:'spotify',   icon:Music2,     short:'Spotify'   },
+  { id:'apple',     icon:Music3,     short:'Apple'     },
   { id:'youtube',   icon:Play,       short:'YouTube'   },
+  { id:'instagram', icon:Activity,   short:'Instagram' },
+  { id:'tiktok',    icon:Waves,      short:'TikTok'    },
+  { id:'cd',        icon:Radio,      short:'CD'        },
   { id:'phone',     icon:Smartphone, short:'Phone'     },
   { id:'broadcast', icon:Radio,      short:'Broadcast' },
 ];
@@ -36,7 +39,7 @@ const PRESET_SLIDER_DEFAULTS = {
   auto:      { reverb:0.35, bass:1,  brightness:0.5, warmth:0.25, compression:0.55, nr:0.30 },
   custom:    { reverb:0.35, bass:1,  brightness:0.5, warmth:0.25, compression:0.55, nr:0.30 },
 };
-const PLATFORM_PRESET_HINT = { instagram:'instagram', tiktok:'instagram', youtube:'cinematic', phone:'phone', broadcast:'rich' };
+const PLATFORM_PRESET_HINT = { spotify:'cinematic', apple:'cinematic', youtube:'cinematic', instagram:'instagram', tiktok:'instagram', cd:'rich', phone:'phone', broadcast:'rich' };
 const QUICK_TAGS = ['cinematic reverb','deep bass','warm vintage','crisp','podcast voice','boxy phone','lo-fi'];
 
 // ── Helpers ────────────────────────────────────────────────────
@@ -125,7 +128,8 @@ function App(){
   const [audioBuffer,setAudioBuffer]=useState(null);
   const [analysis,setAnalysis]=useState(null);
   const [preset,setPreset]=useState('cinematic');
-  const [platform,setPlatform]=useState('instagram');
+  const [platform,setPlatform]=useState('spotify');
+  const [genre,setGenre]=useState('auto');
   const [customPrompt,setCustomPrompt]=useState('');
   const [showCustom,setShowCustom]=useState(false);
   const [reverbAmount,setReverbAmount]=useState(PRESET_SLIDER_DEFAULTS.cinematic.reverb);
@@ -354,7 +358,7 @@ function App(){
     setOutputBlob(null);setOutputUrl(null);setOutputAnalysis(null);
     if(isPlaying){engineRef.current?.pause();setIsPlaying(false);if(posTimerRef.current){clearInterval(posTimerRef.current);posTimerRef.current=null;}}
     try{
-      const cfg={preset,customPrompt,platform,reverbAmount,bassBoost,brightness,warmth,compression,noiseReduction,autoTrim,trimRange:autoTrim?(analysis?.suggestedTrim||null):null};
+      const cfg={preset,customPrompt,platform,genre,reverbAmount,bassBoost,brightness,warmth,compression,noiseReduction,autoTrim,trimRange:autoTrim?(analysis?.suggestedTrim||null):null};
       const blob=await renderMaster(audioBuffer,cfg,(p,l)=>{setProgress(p);if(l)setProgressStep(l);});
       const url=URL.createObjectURL(blob);prevOutUrlRef.current=url;
       setOutputBlob(blob);setOutputUrl(url);setOutputAnalysis({lufs:blob.__lufs,peak:blob.__peak});
@@ -575,12 +579,44 @@ function App(){
                 <p style={{color:'#94a3b8',fontSize:'0.72rem',fontWeight:700,letterSpacing:'0.12em',textTransform:'uppercase',margin:0,display:'flex',alignItems:'center',gap:8}}><Settings2 size={12}/>Platform target</p>
                 <span className="mono" style={{color:'#c4b5fd',fontSize:'0.78rem',fontWeight:600,transition:'all 0.2s ease'}}>{platformTarget.lufs} LUFS · {platformTarget.peak} dBTP</span>
               </div>
-              <div className="segmented">
+              <div className="segmented" style={{flexWrap:'wrap'}}>
                 {PLATFORM_META.map(p=>{
                   const Icon=p.icon,active=platform===p.id;
                   return<button key={p.id} className={active?'active':''} onClick={()=>handlePlatformChange(p.id)} title={`${PLATFORM_TARGETS[p.id].label} — ${PLATFORM_TARGETS[p.id].lufs} LUFS`}><span style={{display:'inline-flex',alignItems:'center',gap:5}}><Icon size={11}/><span>{p.short}</span></span></button>;
                 })}
               </div>
+            </div>
+
+            {/* Genre EQ Curve */}
+            <div style={{marginBottom:24}}>
+              <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:10}}>
+                <p style={{color:'#94a3b8',fontSize:'0.72rem',fontWeight:700,letterSpacing:'0.12em',textTransform:'uppercase',margin:0,display:'flex',alignItems:'center',gap:8}}><Music2 size={12}/>Genre EQ curve</p>
+                <span style={{color:'#c4b5fd',fontSize:'0.72rem',fontWeight:600}}>{GENRE_CURVES[genre]?.emoji} {GENRE_CURVES[genre]?.name}</span>
+              </div>
+              <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(90px,1fr))',gap:6}}>
+                {Object.entries(GENRE_CURVES).map(([id,g])=>{
+                  const active=genre===id;
+                  return(
+                    <button key={id} onClick={()=>setGenre(id)} style={{padding:'8px 6px',borderRadius:10,border:`1.5px solid ${active?'rgba(34,211,238,0.55)':'rgba(255,255,255,0.07)'}`,background:active?'rgba(34,211,238,0.10)':'rgba(255,255,255,0.02)',cursor:'pointer',fontFamily:'inherit',textAlign:'center',transition:'all 0.15s ease',boxShadow:active?'0 0 14px rgba(34,211,238,0.2)':'none'}}>
+                      <div style={{fontSize:'1.1rem',marginBottom:2}}>{g.emoji}</div>
+                      <p style={{color:active?'#67e8f9':'#94a3b8',fontWeight:700,fontSize:'0.62rem',margin:0,lineHeight:1.2}}>{g.name}</p>
+                    </button>
+                  );
+                })}
+              </div>
+              {genre!=='auto'&&(
+                <div style={{marginTop:8,padding:'6px 10px',borderRadius:8,background:'rgba(34,211,238,0.06)',border:'1px solid rgba(34,211,238,0.12)'}}>
+                  <p style={{color:'#67e8f9',fontSize:'0.7rem',margin:0}}>
+                    <strong>{GENRE_CURVES[genre].name}</strong>
+                    {GENRE_CURVES[genre].sub>0&&` · Sub +${GENRE_CURVES[genre].sub}dB`}
+                    {GENRE_CURVES[genre].bass>0&&` · Bass +${GENRE_CURVES[genre].bass}dB`}
+                    {GENRE_CURVES[genre].loMid<0&&` · LoMid ${GENRE_CURVES[genre].loMid}dB`}
+                    {GENRE_CURVES[genre].mid!==0&&` · Mid ${GENRE_CURVES[genre].mid>0?'+':''}${GENRE_CURVES[genre].mid}dB`}
+                    {GENRE_CURVES[genre].pres>0&&` · Pres +${GENRE_CURVES[genre].pres}dB`}
+                    {GENRE_CURVES[genre].air>0&&` · Air +${GENRE_CURVES[genre].air}dB`}
+                  </p>
+                </div>
+              )}
             </div>
 
             {/* Real-time panel */}
@@ -681,7 +717,7 @@ function App(){
                   <span style={{display:'flex',alignItems:'center',gap:10}}>
                     <Sparkles size={18}/>{audioBuffer?'Master & Download':'Upload audio first'}{audioBuffer&&<ChevronRight size={18}/>}
                   </span>
-                  {audioBuffer&&<span style={{fontSize:'0.72rem',fontWeight:500,opacity:0.85}}>{currentPresetCfg?.name} · {platformTarget.label} · {platformTarget.lufs} LUFS · TPDF dithered</span>}
+                  {audioBuffer&&<span style={{fontSize:'0.72rem',fontWeight:500,opacity:0.85}}>{currentPresetCfg?.name} · {GENRE_CURVES[genre]?.name} · {platformTarget.label} · {platformTarget.lufs} LUFS · TPDF dithered</span>}
                 </button>
               )}
             </div>
@@ -699,7 +735,7 @@ function App(){
                 <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:10,marginBottom:16}}>
                   <StatTile label="Final LUFS" value={fmtLufs(outputAnalysis.lufs)} sub={Math.abs(outputAnalysis.lufs-platformTarget.lufs)<0.7?`Matches ${platformTarget.label}`:`Target ${platformTarget.lufs}`} accent="#34d399"/>
                   <StatTile label="True Peak" value={`${fmtDb(outputAnalysis.peak)} dBTP`} sub={outputAnalysis.peak<=platformTarget.peak+0.1?'Within ceiling':'Above ceiling'} accent={outputAnalysis.peak<=platformTarget.peak+0.1?'#34d399':'#fb923c'}/>
-                  <StatTile label="Quality" value="Studio" sub="TPDF · 16-bit · 44.1k" accent="#34d399"/>
+                  <StatTile label="Quality" value="Studio" sub={`${GENRE_CURVES[genre]?.name} · TPDF · 16-bit`} accent="#34d399"/>
                 </div>
                 <div style={{display:'flex',alignItems:'center',gap:12,padding:'12px 16px',borderRadius:12,background:'rgba(0,0,0,0.25)',marginBottom:14}}>
                   <button onClick={()=>{if(outputAudioRef.current){if(outputPlaying){outputAudioRef.current.pause();setOutputPlaying(false);}else{outputAudioRef.current.play();setOutputPlaying(true);}}}} style={{width:38,height:38,borderRadius:'50%',flexShrink:0,background:'rgba(16,185,129,0.18)',border:'1px solid rgba(16,185,129,0.3)',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center'}}>
