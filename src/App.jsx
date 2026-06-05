@@ -6,7 +6,7 @@ import {
   Mic, MicOff, Circle, Square, Headphones, Sliders,
 } from 'lucide-react';
 import {
-  decodeFile, analyzeAudio, buildRealtimeEngine, renderMaster, renderVoiceMorph,
+  decodeFile, analyzeAudio, buildRealtimeEngine, buildMorphPreviewEngine, renderMaster, renderVoiceMorph,
   buildLiveMicEngine, PRESETS as ENGINE_PRESETS, PLATFORM_TARGETS,
   VOICE_MORPHS, parseVoiceMorphPrompt,
 } from './audioProcessor.js';
@@ -471,11 +471,12 @@ function App(){
   useEffect(()=>{
     teardownMorphEngine();
     if(!morphBuffer)return;
-    const eng=buildRealtimeEngine(morphBuffer);
+    const morphCfg=morphPreset&&VOICE_MORPHS[morphPreset]?VOICE_MORPHS[morphPreset]:null;
+    const eng=morphCfg?buildMorphPreviewEngine(morphBuffer,morphCfg):buildRealtimeEngine(morphBuffer);
     morphEngineRef.current=eng;
     eng.onMeter(m=>setMorphPreviewMeter(m));
-    eng.setReverb(0.25);eng.setBass(0);eng.setBrightness(0);eng.setWarmth(0.2);eng.setCompression(0.5);
-  },[morphBuffer,teardownMorphEngine]);
+    eng.setReverb(morphRevSlider);eng.setBass(morphBassSlider);eng.setBrightness(morphBrightSlider);eng.setWarmth(morphWarmSlider);eng.setCompression(morphPunchSlider);
+  },[morphBuffer,morphPreset,teardownMorphEngine]);// eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(()=>{if(mode!=='morph')teardownMorphEngine();},[mode,teardownMorphEngine]);
 
@@ -946,7 +947,9 @@ function App(){
               <div className="glass animate-fade-in" style={{padding:20,marginBottom:24}}>
                 <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:16,flexWrap:'wrap',gap:8}}>
                   <p style={{color:'#94a3b8',fontSize:'0.72rem',fontWeight:700,letterSpacing:'0.12em',textTransform:'uppercase',margin:0,display:'flex',alignItems:'center',gap:8}}><Activity size={12}/>Real-time preview &amp; shape</p>
-                  <span style={{fontSize:'0.68rem',fontWeight:600,padding:'3px 10px',borderRadius:999,background:'rgba(34,211,238,0.1)',color:'#67e8f9',border:'1px solid rgba(34,211,238,0.25)'}}>Source · live effects</span>
+                  <span style={{fontSize:'0.68rem',fontWeight:600,padding:'3px 10px',borderRadius:999,background:morphPreset?'rgba(168,85,247,0.12)':'rgba(34,211,238,0.1)',color:morphPreset?'#c4b5fd':'#67e8f9',border:`1px solid ${morphPreset?'rgba(168,85,247,0.3)':'rgba(34,211,238,0.25)'}`}}>
+                    {morphPreset&&VOICE_MORPHS[morphPreset]?`${VOICE_MORPHS[morphPreset].emoji} ${VOICE_MORPHS[morphPreset].name} · live`:'Source · live effects'}
+                  </span>
                 </div>
 
                 {/* Transport */}
@@ -987,7 +990,7 @@ function App(){
                   <VerticalSlider label="Warmth"     icon={Film}     value={morphWarmSlider}  min={0}  max={1}  step={0.01} onChange={setMorphWarmSlider}  displayValue={`${Math.round(morphWarmSlider*100)}%`}   accent="#f59e0b"/>
                   <VerticalSlider label="Punch"      icon={Zap}      value={morphPunchSlider} min={0}  max={1}  step={0.01} onChange={setMorphPunchSlider} displayValue={`${Math.round(morphPunchSlider*100)}%`}  accent="#10b981"/>
                 </div>
-                <p style={{color:'#334155',fontSize:'0.68rem',margin:'8px 0 0',textAlign:'center'}}>Live-shapes source audio · pick a morph below then hit Transform</p>
+                <p style={{color:'#334155',fontSize:'0.68rem',margin:'8px 0 0',textAlign:'center'}}>{morphPreset?'Hearing live morph preview · sliders fine-tune post-morph sound':'Pick a morph below to hear it live · sliders shape the sound'}</p>
               </div>
             )}
 

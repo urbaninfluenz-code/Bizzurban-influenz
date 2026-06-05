@@ -925,6 +925,190 @@ export function buildRealtimeEngine(audioBuffer){
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// VOICE MORPH PREVIEW ENGINE  — real-time AudioContext playback with morph DSP
+// Mirrors renderVoiceMorph but uses a live AudioContext instead of offline.
+// Pitch shift: playbackRate (changes tempo+pitch together — fine for preview).
+// Ring mod, distortion, bit crush, LP/HP, chorus, reverb: identical to offline.
+// Post-morph chain (bass shelf, air shelf, saturation, compression, extra reverb)
+// is controlled by the 5 shape sliders and initialised from `state` so values
+// set before play() are applied when the AudioContext is first created.
+// ─────────────────────────────────────────────────────────────────────────────
+export function buildMorphPreviewEngine(audioBuffer, morphCfg){
+  const pitchRatio=morphCfg?Math.pow(2,(morphCfg.pitchSt||0)/12):1;
+  let state={reverb:0,bass:0,brightness:0,warmth:0.1,compression:0.5};
+
+  let ctx=null,source=null,analyser=null,masterGain=null,firstNode=null;
+  let postRevWet=null,postEqBass=null,postEqAir=null,postSat=null,postComp=null;
+  let meterCb=null,meterTimer=null;
+  let playing=false,startedAt=0,pausedAt=0;
+
+  function ensureCtx(){
+    if(ctx)return;
+    const Ctx=window.AudioContext||window.webkitAudioContext;
+    ctx=new Ctx();
+
+    // HP filter (always present)
+    const hp=ctx.createBiquadFilter(); hp.type='highpass';
+    hp.frequency.value=morphCfg?.hp||20; hp.Q.value=0.7;
+    firstNode=hp; let n=hp;
+
+    // Ring modulation (alien, robot, glitch, demon, ghost)
+    if(morphCfg&&(morphCfg.ringHz||0)>0){
+      const osc=ctx.createOscillator(); osc.type='sine'; osc.frequency.value=morphCfg.ringHz;
+      const rG=ctx.createGain(); rG.gain.value=0;
+      const dG=ctx.createGain(); dG.gain.value=1-(morphCfg.ringMix||0.7);
+      const wG=ctx.createGain(); wG.gain.value=morphCfg.ringMix||0.7;
+      const mx=ctx.createGain();
+      osc.connect(rG.gain); n.connect(rG); n.connect(dG);
+      rG.connect(wG); wG.connect(mx); dG.connect(mx);
+      osc.start(); n=mx;
+    }
+
+    // Distortion (monster, demon, megaphone, glitch)
+    if(morphCfg&&(morphCfg.dist||0)>0.01){
+      const ws=ctx.createWaveShaper(); ws.curve=makeSatCurve(morphCfg.dist); ws.oversample='4x';
+      const trim=ctx.createGain(); trim.gain.value=0.75;
+      n.connect(ws); ws.connect(trim); n=trim;
+    }
+
+    // Bit crusher (robot, glitch)
+    if(morphCfg&&(morphCfg.bits||0)>0){
+      const ws=ctx.createWaveShaper(); ws.curve=makeBitCrusherCurve(morphCfg.bits);
+      n.connect(ws); n=ws;
+    }
+
+    // LP filter (megaphone, radio, underwater)
+    const lp=ctx.createBiquadFilter(); lp.type='lowpass';
+    lp.frequency.value=Math.min(ctx.sampleRate/2-100,morphCfg?.lp||20000); lp.Q.value=0.7;
+    n.connect(lp); n=lp;
+
+    // Chorus (ghost, underwater, angel)
+    if(morphCfg&&(morphCfg.chorus||0)>0.05){
+      const d1=ctx.createDelay(0.05); d1.delayTime.value=0.022;
+      const d2=ctx.createDelay(0.05); d2.delayTime.value=0.030;
+      const l1=ctx.createOscillator(); l1.frequency.value=0.7; l1.type='sine';
+      const l2=ctx.createOscillator(); l2.frequency.value=0.9; l2.type='sine';
+      const lg1=ctx.createGain(); lg1.gain.value=0.008*morphCfg.chorus;
+      const lg2=ctx.createGain(); lg2.gain.value=0.010*morphCfg.chorus;
+      const cg1=ctx.createGain(); cg1.gain.value=morphCfg.chorus*0.5;
+      const cg2=ctx.createGain(); cg2.gain.value=morphCfg.chorus*0.5;
+      const dry=ctx.createGain(); dry.gain.value=1-morphCfg.chorus*0.4;
+      const mx=ctx.createGain();
+      l1.connect(lg1); lg1.connect(d1.delayTime);
+      l2.connect(lg2); lg2.connect(d2.delayTime);
+      n.connect(d1); n.connect(d2); n.connect(dry);
+      d1.connect(cg1); d2.connect(cg2);
+      dry.connect(mx); cg1.connect(mx); cg2.connect(mx);
+      l1.start(); l2.start(); n=mx;
+    }
+
+    // Reverb (cave, ghost, underwater, angel, monster)
+    if(morphCfg&&(morphCfg.rev||0)>0.02){
+      const dur=1+morphCfg.rev*5, decay=1.5+morphCfg.rev*1.5;
+      const pre=ctx.createDelay(0.1); pre.delayTime.value=0.015;
+      const conv=ctx.createConvolver(); conv.buffer=generateIR(ctx,dur,decay,morphCfg.rev);
+      const dG=ctx.createGain(); dG.gain.value=1-morphCfg.rev*0.5;
+      const wG=ctx.createGain(); wG.gain.value=morphCfg.rev*0.8;
+      const mx=ctx.createGain();
+      n.connect(dG); n.connect(pre); pre.connect(conv); conv.connect(wG);
+      dG.connect(mx); wG.connect(mx); n=mx;
+    }
+
+    // Post-morph shape chain — driven by the 5 sliders
+    postEqBass=ctx.createBiquadFilter(); postEqBass.type='lowshelf';
+    postEqBass.frequency.value=90; postEqBass.gain.value=state.bass;
+    postEqAir=ctx.createBiquadFilter(); postEqAir.type='highshelf';
+    postEqAir.frequency.value=10000; postEqAir.gain.value=state.brightness;
+    postSat=ctx.createWaveShaper(); postSat.curve=makeSatCurve(state.warmth*0.5); postSat.oversample='4x';
+    postComp=ctx.createDynamicsCompressor();
+    postComp.threshold.value=-24-state.compression*8; postComp.ratio.value=2+state.compression*4;
+    postComp.knee.value=6; postComp.attack.value=0.003; postComp.release.value=0.1;
+    // Extra reverb (slider adds on top of morph reverb)
+    const addPre=ctx.createDelay(0.1); addPre.delayTime.value=0.012;
+    const addConv=ctx.createConvolver(); addConv.buffer=generateIR(ctx,2,1.5,0.5);
+    const postRevDry2=ctx.createGain(); postRevDry2.gain.value=1;
+    postRevWet=ctx.createGain(); postRevWet.gain.value=state.reverb*0.5;
+    const addMix=ctx.createGain();
+
+    n.connect(postEqBass); n=postEqBass;
+    n.connect(postEqAir); n=postEqAir;
+    n.connect(postSat); n=postSat;
+    n.connect(postComp); n=postComp;
+    n.connect(postRevDry2); n.connect(addPre); addPre.connect(addConv); addConv.connect(postRevWet);
+    postRevDry2.connect(addMix); postRevWet.connect(addMix); n=addMix;
+
+    analyser=ctx.createAnalyser(); analyser.fftSize=2048; analyser.smoothingTimeConstant=0.6;
+    masterGain=ctx.createGain(); masterGain.gain.value=0.88;
+    n.connect(analyser); analyser.connect(masterGain); masterGain.connect(ctx.destination);
+  }
+
+  function startMeter(){
+    if(meterTimer)return;
+    const arr=new Float32Array(2048);
+    meterTimer=setInterval(()=>{
+      if(!analyser||!meterCb)return;
+      try{analyser.getFloatTimeDomainData(arr);}catch(_){
+        const b=new Uint8Array(2048); analyser.getByteTimeDomainData(b);
+        for(let i=0;i<b.length;i++) arr[i]=(b[i]-128)/128;
+      }
+      let peak=0,ss=0;
+      for(let i=0;i<arr.length;i++){const v=arr[i];if(Math.abs(v)>peak)peak=Math.abs(v);ss+=v*v;}
+      const rms=Math.sqrt(ss/arr.length);
+      meterCb({peakDb:peak>0?Math.max(-60,20*Math.log10(peak)):-60,rmsDb:rms>0?Math.max(-60,20*Math.log10(rms)):-60});
+    },33);
+  }
+  function stopMeter(){if(meterTimer){clearInterval(meterTimer);meterTimer=null;}}
+  function stopSrc(){
+    if(source){try{source.onended=null;source.stop();}catch(_){}try{source.disconnect();}catch(_){}source=null;}
+  }
+  function startSrc(fromOrig){
+    if(!ctx||!firstNode)return;
+    stopSrc();
+    source=ctx.createBufferSource(); source.buffer=audioBuffer;
+    source.playbackRate.value=pitchRatio;
+    source.connect(firstNode);
+    const off=Math.max(0,Math.min(audioBuffer.duration,fromOrig));
+    pausedAt=off; startedAt=ctx.currentTime;
+    source.onended=()=>{if(playing&&source){playing=false;pausedAt=audioBuffer.duration;source=null;}};
+    source.start(0,off); playing=true;
+  }
+
+  return {
+    async play(){
+      ensureCtx();
+      if(ctx.state==='suspended')try{await ctx.resume();}catch(_){}
+      startSrc(pausedAt>=audioBuffer.duration-0.01?0:pausedAt);
+      startMeter();
+    },
+    pause(){
+      if(!ctx)return;
+      if(playing&&source) pausedAt=Math.min(audioBuffer.duration,pausedAt+(ctx.currentTime-startedAt)*pitchRatio);
+      stopSrc(); playing=false; stopMeter();
+      if(meterCb)meterCb({peakDb:-60,rmsDb:-60});
+    },
+    seek(s){
+      const t=Math.max(0,Math.min(audioBuffer.duration,s));
+      if(playing){startSrc(t);}else{pausedAt=t;}
+    },
+    setReverb(v){state.reverb=v;if(postRevWet&&ctx)postRevWet.gain.setTargetAtTime(Math.max(0,v*0.5),ctx.currentTime,0.05);},
+    setBass(db){state.bass=db;if(postEqBass&&ctx)postEqBass.gain.setTargetAtTime(db,ctx.currentTime,0.05);},
+    setBrightness(db){state.brightness=db;if(postEqAir&&ctx)postEqAir.gain.setTargetAtTime(db,ctx.currentTime,0.05);},
+    setWarmth(v){state.warmth=v;if(postSat)postSat.curve=makeSatCurve(v*0.5);},
+    setCompression(v){
+      state.compression=v;
+      if(!postComp||!ctx)return;
+      postComp.ratio.setTargetAtTime(2+v*4,ctx.currentTime,0.05);
+      postComp.threshold.setTargetAtTime(-24-v*8,ctx.currentTime,0.05);
+    },
+    getTime(){if(!ctx)return pausedAt;return playing?Math.min(audioBuffer.duration,pausedAt+(ctx.currentTime-startedAt)*pitchRatio):pausedAt;},
+    getDuration(){return audioBuffer.duration;},
+    isPlaying(){return playing;},
+    onMeter(cb){meterCb=cb;if(playing&&analyser)startMeter();},
+    destroy(){stopSrc();stopMeter();meterCb=null;if(ctx){try{ctx.close();}catch(_){}}ctx=null;firstNode=null;},
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // LIVE MIC ENGINE — getUserMedia → real-time FX chain + optional recording
 // ─────────────────────────────────────────────────────────────────────────────
 export async function buildLiveMicEngine(onMeter){
