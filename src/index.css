@@ -180,6 +180,22 @@ input[type="range"]::-webkit-slider-thumb:hover {
   font-variant-numeric: tabular-nums;
 }
 
+/* ---------- Slider grid (responsive 5→3 col on narrow) ---------- */
+.slider-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 6px;
+}
+
+@media (max-width: 500px) {
+  .slider-grid {
+    grid-template-columns: repeat(3, 1fr);
+  }
+  .segmented button span span {
+    display: none;
+  }
+}
+
 /* ---------- Scrollbar ---------- */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
