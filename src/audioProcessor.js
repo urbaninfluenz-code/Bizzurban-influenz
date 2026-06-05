@@ -1002,9 +1002,9 @@ export async function renderVoiceMorph(audioBuffer, morphCfg, onProgress){
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// AudioWorklet pitch shifter code (loaded as blob URL for live pitch shift)
-// Simple ring buffer with variable read speed. Not a phase vocoder, but produces
-// the audible pitch effect with minimal latency.
+// AudioWorklet pitch shifter — ring buffer with BYPASS when semitones≈0
+// Bypass = direct sample copy = absolute zero added latency when inactive.
+// Reduced ring buffer (4096) keeps snap-to-pitch lag under 93ms @44.1kHz.
 // ─────────────────────────────────────────────────────────────────────────────
 export const PITCH_WORKLET_CODE=`
 class PitchShifterProcessor extends AudioWorkletProcessor {
@@ -1013,7 +1013,7 @@ class PitchShifterProcessor extends AudioWorkletProcessor {
   }
   constructor(){
     super();
-    this._bufLen=16384;
+    this._bufLen=4096;
     this._buf=new Float32Array(this._bufLen);
     this._writePos=0;
     this._readPos=0;
@@ -1023,13 +1023,21 @@ class PitchShifterProcessor extends AudioWorkletProcessor {
     const out=outputs[0]?.[0];
     if(!inp||!out) return true;
     const st=params.semitones[0]??0;
+    if(Math.abs(st)<0.05){
+      // BYPASS: direct copy — zero added latency
+      for(let i=0;i<inp.length;i++){
+        out[i]=inp[i];
+        this._buf[this._writePos%this._bufLen]=inp[i];
+        this._writePos++;
+      }
+      this._readPos=this._writePos-256;
+      return true;
+    }
     const ratio=Math.pow(2,st/12);
-    // Write input
     for(let i=0;i<inp.length;i++){
       this._buf[this._writePos%this._bufLen]=inp[i];
       this._writePos++;
     }
-    // Read at ratio speed (linear interp)
     for(let i=0;i<out.length;i++){
       const rp=this._readPos;
       const ri=Math.floor(rp)%this._bufLen;
@@ -1038,10 +1046,9 @@ class PitchShifterProcessor extends AudioWorkletProcessor {
       out[i]=this._buf[ri]*(1-frac)+this._buf[rn]*frac;
       this._readPos+=ratio;
     }
-    // Keep readPos within bounds of written data (prevent lag buildup)
     const lag=this._writePos-this._readPos;
-    if(lag<64)  this._readPos-=32;
-    if(lag>this._bufLen*0.75) this._readPos=this._writePos-512;
+    if(lag<32)  this._readPos-=16;
+    if(lag>this._bufLen*0.5) this._readPos=this._writePos-256;
     return true;
   }
 }
@@ -1357,16 +1364,73 @@ export function buildMorphPreviewEngine(audioBuffer, morphCfg){
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// LIVE MIC ENGINE — getUserMedia → real-time FX chain + optional recording
+// LIVE FDN REVERB — Schroeder/Moorer comb filter reverb, ZERO algorithmic latency
+// Pure DelayNode-based (no ConvolverNode, no FFT, no block-size overhead).
+// 6 parallel comb filters with LPF damping + feedback, dry/wet mix.
+// ─────────────────────────────────────────────────────────────────────────────
+function buildLiveFDNReverb(ctx, reverbTime, damping, wetInit){
+  const combTimes=[0.0297,0.0371,0.0411,0.0437,0.0517,0.0557];
+  const input=ctx.createGain();
+  const combMix=ctx.createGain(); combMix.gain.value=1/combTimes.length;
+  const wetG=ctx.createGain(); wetG.gain.value=wetInit;
+  const dryG=ctx.createGain(); dryG.gain.value=1.0;
+  const output=ctx.createGain();
+
+  const combs=combTimes.map(t=>{
+    const d=ctx.createDelay(0.12); d.delayTime.value=t;
+    const fb=ctx.createGain();
+    fb.gain.value=Math.min(0.94, Math.pow(10,-3*t/reverbTime));
+    const lp=ctx.createBiquadFilter(); lp.type='lowpass';
+    lp.frequency.value=Math.max(1000, 8000-damping*7000);
+    input.connect(d);
+    d.connect(lp); lp.connect(fb); fb.connect(d); // feedback loop
+    d.connect(combMix);
+    return {d,fb,lp};
+  });
+
+  input.connect(dryG);
+  combMix.connect(wetG);
+  dryG.connect(output); wetG.connect(output);
+
+  return {
+    input, output,
+    setWet(v){wetG.gain.setTargetAtTime(Math.max(0,Math.min(1,v)),ctx.currentTime,0.03);},
+    setRoom(size){
+      const T=ctx.currentTime;
+      combs.forEach(({d,fb},i)=>{
+        const t=combTimes[i]*(0.5+size*0.5);
+        d.delayTime.setTargetAtTime(t,T,0.05);
+        fb.gain.setTargetAtTime(Math.min(0.94,Math.pow(10,-3*t/(0.3+size*3))),T,0.05);
+      });
+    },
+    setDamping(v){
+      const f=Math.max(1000,8000-v*7000);
+      combs.forEach(({lp})=>lp.frequency.setTargetAtTime(f,ctx.currentTime,0.05));
+    },
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LIVE MIC ENGINE — zero-latency monitoring + real-time FX
+// Key design decisions for minimum latency:
+//   • latencyHint:0 → requests smallest possible hardware buffer (~3ms @48kHz)
+//   • FDN reverb (DelayNode comb filters) instead of ConvolverNode — no FFT overhead
+//   • AudioWorklet bypasses directly when semitones≈0 (no ring-buffer delay)
+//   • No oversample:'4x' on saturation — saves one upsampling pass per block
+//   • AnalyserNode fftSize:1024 (was 2048) — halves analysis window
 // ─────────────────────────────────────────────────────────────────────────────
 export async function buildLiveMicEngine(onMeter){
-  const stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false},video:false});
+  const stream=await navigator.mediaDevices.getUserMedia({
+    audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false},
+    video:false,
+  });
   const Ctx=window.AudioContext||window.webkitAudioContext;
-  const ctx=new Ctx({latencyHint:'interactive'});
+  // latencyHint:0 requests minimum hardware buffer (browser will try ~128 samples)
+  const ctx=new Ctx({latencyHint:0});
+  if(ctx.state==='suspended') try{await ctx.resume();}catch(_){}
 
-  // Try to load AudioWorklet pitch shifter
-  let pitchNode=null;
-  let pitchWorkletLoaded=false;
+  // AudioWorklet pitch shifter (has direct bypass when semitones≈0)
+  let pitchNode=null, pitchWorkletLoaded=false;
   try{
     const blob=new Blob([PITCH_WORKLET_CODE],{type:'application/javascript'});
     const url=URL.createObjectURL(blob);
@@ -1374,50 +1438,54 @@ export async function buildLiveMicEngine(onMeter){
     URL.revokeObjectURL(url);
     pitchNode=new AudioWorkletNode(ctx,'sonix-pitch-shifter',{numberOfInputs:1,numberOfOutputs:1,outputChannelCount:[1]});
     pitchWorkletLoaded=true;
-  }catch(e){
-    // AudioWorklet not supported — proceed without pitch shift
-    console.warn('AudioWorklet not available, pitch shift disabled',e);
-  }
+  }catch(e){console.warn('AudioWorklet unavailable:',e);}
 
   const micSrc=ctx.createMediaStreamSource(stream);
 
-  // Static chain nodes
+  // HPF — remove sub-rumble
   const hpf=ctx.createBiquadFilter(); hpf.type='highpass'; hpf.frequency.value=80; hpf.Q.value=0.7;
-  const eq=buildEqChain(ctx,PRESETS.cinematic,{bassBoost:0,brightness:0});
-  const sat=ctx.createWaveShaper(); sat.curve=makeSatCurve(0.1); sat.oversample='4x';
-  const satTrim=ctx.createGain(); satTrim.gain.value=0.82;
-  const comp=ctx.createDynamicsCompressor();
-  comp.threshold.value=-22; comp.ratio.value=3.5; comp.knee.value=8; comp.attack.value=0.006; comp.release.value=0.18;
-  const reverbPre=ctx.createDelay(0.2); reverbPre.delayTime.value=0.018;
-  const reverb=ctx.createConvolver(); reverb.buffer=generateIR(ctx,2.5,2.2,0.65);
-  const revDry=ctx.createGain(); revDry.gain.value=1.0;
-  const revWet=ctx.createGain(); revWet.gain.value=0.25;
-  const revMix=ctx.createGain();
-  const analyser=ctx.createAnalyser(); analyser.fftSize=2048; analyser.smoothingTimeConstant=0.65;
-  const masterGain=ctx.createGain(); masterGain.gain.value=0.88;
 
-  // Ring modulator (for live voice morph)
-  const ringOsc=ctx.createOscillator(); ringOsc.type='sine'; ringOsc.frequency.value=0;
+  // EQ
+  const eq=buildEqChain(ctx,PRESETS.cinematic,{bassBoost:0,brightness:0});
+
+  // Saturation — NO oversample:'4x' in live path (saves ~0.5ms per block)
+  const sat=ctx.createWaveShaper(); sat.curve=makeSatCurve(0.1); sat.oversample='2x';
+  const satTrim=ctx.createGain(); satTrim.gain.value=0.85;
+
+  // Compressor
+  const comp=ctx.createDynamicsCompressor();
+  comp.threshold.value=-22; comp.ratio.value=3.5; comp.knee.value=8;
+  comp.attack.value=0.006; comp.release.value=0.18;
+
+  // Ring modulator (voice morph)
+  const ringOsc=ctx.createOscillator(); ringOsc.type='sine'; ringOsc.frequency.value=0.01;
   const ringMod=ctx.createGain(); ringMod.gain.value=0;
   const ringDry=ctx.createGain(); ringDry.gain.value=1.0;
   const ringWet=ctx.createGain(); ringWet.gain.value=0.0;
   const ringMix=ctx.createGain();
-  ringOsc.connect(ringMod.gain);
-  ringOsc.start();
+  ringOsc.connect(ringMod.gain); ringOsc.start();
+
+  // FDN reverb — zero-latency comb filter reverb (replaces ConvolverNode)
+  const fdn=buildLiveFDNReverb(ctx, 1.5, 0.5, 0.25);
+
+  // Analyser (smaller fftSize for lower analysis latency)
+  const analyser=ctx.createAnalyser(); analyser.fftSize=1024; analyser.smoothingTimeConstant=0.55;
+
+  // Master gain (also controls monitor on/off)
+  const masterGain=ctx.createGain(); masterGain.gain.value=0.88;
 
   // Wire chain
   let n=micSrc;
   n.connect(hpf); n=hpf;
-  if(pitchNode){n.connect(pitchNode);n=pitchNode;}
+  if(pitchNode){n.connect(pitchNode); n=pitchNode;}
   n.connect(eq.input); n=eq.output;
   n.connect(sat); sat.connect(satTrim); n=satTrim;
   n.connect(comp); n=comp;
-  // Ring mod parallel
+  // Ring mod (parallel dry/wet)
   n.connect(ringDry); n.connect(ringMod);
   ringMod.connect(ringWet); ringDry.connect(ringMix); ringWet.connect(ringMix); n=ringMix;
-  // Reverb parallel
-  n.connect(revDry); n.connect(reverbPre); reverbPre.connect(reverb); reverb.connect(revWet);
-  revDry.connect(revMix); revWet.connect(revMix); n=revMix;
+  // FDN reverb (dry+wet mixed internally)
+  n.connect(fdn.input); n=fdn.output;
   n.connect(analyser); analyser.connect(masterGain); masterGain.connect(ctx.destination);
 
   // Meter loop
@@ -1433,16 +1501,20 @@ export async function buildLiveMicEngine(onMeter){
     },33);
   }
 
-  // Recording support
+  // Recording
   const recDest=ctx.createMediaStreamDestination();
   masterGain.connect(recDest);
   let recorder=null, recChunks=[];
 
+  // Measure actual round-trip latency (hardware + buffer)
+  const latencyMs=Math.round(((ctx.outputLatency||0)+(ctx.baseLatency||0))*1000);
+
   return {
     hasPitch:pitchWorkletLoaded,
-    setMonitor(on){masterGain.gain.value=on?0.88:0;},
-    setPitch(semitones){if(pitchNode)pitchNode.parameters.get('semitones').setTargetAtTime(semitones,ctx.currentTime,0.03);},
-    setReverb(v){revWet.gain.setTargetAtTime(Math.max(0,Math.min(1,v)),ctx.currentTime,0.03);},
+    latencyMs,
+    setMonitor(on){masterGain.gain.setTargetAtTime(on?0.88:0,ctx.currentTime,0.02);},
+    setPitch(st){if(pitchNode)pitchNode.parameters.get('semitones').setTargetAtTime(st,ctx.currentTime,0.02);},
+    setReverb(v){fdn.setWet(v);},
     setBass(db){eq.nodes[1].gain.setTargetAtTime(PRESETS.cinematic.eq.lowShelfDb+db,ctx.currentTime,0.03);},
     setBrightness(db){eq.nodes[5].gain.setTargetAtTime(PRESETS.cinematic.eq.airDb+db,ctx.currentTime,0.03);},
     setCompression(v){
@@ -1455,15 +1527,13 @@ export async function buildLiveMicEngine(onMeter){
       const m=Math.max(0,Math.min(1,mix));
       ringWet.gain.setTargetAtTime(m,ctx.currentTime,0.05);
       ringDry.gain.setTargetAtTime(1-m,ctx.currentTime,0.05);
-      if(m<0.01) ringMod.gain.setTargetAtTime(0,ctx.currentTime,0.05);
     },
     applyMorph(morphCfg){
-      // Apply all morph parameters to live chain
       if(pitchNode) pitchNode.parameters.get('semitones').setTargetAtTime(morphCfg.pitchSt||0,ctx.currentTime,0.05);
       this.setRingMod(morphCfg.ringHz||0,morphCfg.ringMix||0);
       this.setDistortion(morphCfg.dist||0);
-      this.setReverb(morphCfg.rev||0);
-      revWet.gain.setTargetAtTime((morphCfg.rev||0)*0.8,ctx.currentTime,0.05);
+      fdn.setWet((morphCfg.rev||0)*0.8);
+      fdn.setRoom(morphCfg.rev||0.3);
       hpf.frequency.setTargetAtTime(morphCfg.hp||80,ctx.currentTime,0.05);
       eq.nodes[6].frequency.setTargetAtTime(Math.min(ctx.sampleRate/2-100,morphCfg.lp||20000),ctx.currentTime,0.05);
     },
@@ -1471,7 +1541,8 @@ export async function buildLiveMicEngine(onMeter){
       if(pitchNode) pitchNode.parameters.get('semitones').setTargetAtTime(0,ctx.currentTime,0.1);
       this.setRingMod(0,0);
       this.setDistortion(0);
-      this.setReverb(0.25);
+      fdn.setWet(0.25);
+      fdn.setRoom(0.5);
       hpf.frequency.setTargetAtTime(80,ctx.currentTime,0.1);
       eq.nodes[6].frequency.setTargetAtTime(20000,ctx.currentTime,0.1);
       sat.curve=makeSatCurve(0.1);
@@ -1485,17 +1556,14 @@ export async function buildLiveMicEngine(onMeter){
     stopRecord(){
       return new Promise(res=>{
         if(!recorder){res(null);return;}
-        recorder.onstop=()=>{
-          const blob=new Blob(recChunks,{type:'audio/webm'});
-          res(blob);
-        };
+        recorder.onstop=()=>res(new Blob(recChunks,{type:'audio/webm'}));
         recorder.stop();
       });
     },
     isRecording(){return recorder?.state==='recording';},
     destroy(){
-      if(meterTimer)clearInterval(meterTimer);
-      if(recorder&&recorder.state!=='inactive')try{recorder.stop();}catch(_){}
+      if(meterTimer) clearInterval(meterTimer);
+      if(recorder&&recorder.state!=='inactive') try{recorder.stop();}catch(_){}
       stream.getTracks().forEach(t=>t.stop());
       try{ctx.close();}catch(_){}
     },

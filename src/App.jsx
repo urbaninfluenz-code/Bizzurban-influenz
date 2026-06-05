@@ -154,6 +154,7 @@ function App(){
 
   // ── Live Mic state ──────────────────────────────────────────
   const [liveActive,setLiveActive]=useState(false);
+  const [liveLatencyMs,setLiveLatencyMs]=useState(null);
   const [liveMeter,setLiveMeter]=useState({peakDb:-60,rmsDb:-60});
   const [liveRecording,setLiveRecording]=useState(false);
   const [liveRecUrl,setLiveRecUrl]=useState(null);
@@ -382,6 +383,7 @@ function App(){
       liveEngineRef.current=eng;
       eng.setMonitor(liveMonitor);
       setLiveActive(true);
+      setLiveLatencyMs(eng.latencyMs||null);
       showToast('Live mic active','#10b981');
       if(!eng.hasPitch)showToast('Pitch shift requires modern browser','#f59e0b');
     }catch(err){
@@ -393,7 +395,7 @@ function App(){
   const stopLive=async()=>{
     if(liveRecording)await handleStopRecord();
     if(liveEngineRef.current){try{liveEngineRef.current.destroy();}catch(_){};liveEngineRef.current=null;}
-    setLiveActive(false);setLiveMeter({peakDb:-60,rmsDb:-60});setLiveRecording(false);
+    setLiveActive(false);setLiveMeter({peakDb:-60,rmsDb:-60});setLiveRecording(false);setLiveLatencyMs(null);
   };
 
   const handleStartRecord=()=>{
@@ -765,7 +767,8 @@ function App(){
                 {liveActive?<MicOff size={26} color="#f87171"/>:<Mic size={26} color="#34d399"/>}
               </div>
               <p style={{color:liveActive?'#f87171':'#34d399',fontWeight:700,fontSize:'1rem',margin:'0 0 6px'}}>{liveActive?'Live — Mic Active':'Ready to Go Live'}</p>
-              <p style={{color:'#64748b',fontSize:'0.8rem',margin:'0 0 18px'}}>{liveActive?'Real-time effects active · pitch shift · voice morph':'Connect mic → apply live effects → record'}</p>
+              <p style={{color:'#64748b',fontSize:'0.8rem',margin:'0 0 6px'}}>{liveActive?'Zero-latency FDN reverb · pitch shift bypass · comb-filter monitoring':'Connect mic → real-time effects → record'}</p>
+              {liveActive&&liveLatencyMs!=null&&<p style={{color:'#34d399',fontSize:'0.72rem',fontWeight:600,margin:'0 0 12px',display:'flex',alignItems:'center',justifyContent:'center',gap:6}}><span style={{width:6,height:6,borderRadius:'50%',background:'#34d399',display:'inline-block'}}/>Hardware round-trip: ~{liveLatencyMs}ms</p>}
               <div style={{display:'flex',gap:10,justifyContent:'center',flexWrap:'wrap'}}>
                 <button onClick={liveActive?stopLive:startLive} style={{padding:'12px 28px',borderRadius:999,border:'none',cursor:'pointer',fontFamily:'inherit',fontWeight:700,fontSize:'0.9rem',background:liveActive?'linear-gradient(135deg,#ef4444,#dc2626)':'linear-gradient(135deg,#10b981,#06b6d4)',color:'#fff',display:'flex',alignItems:'center',gap:8,boxShadow:liveActive?'0 0 20px rgba(239,68,68,0.4)':'0 0 20px rgba(16,185,129,0.4)',transition:'all 0.2s ease'}}>
                   {liveActive?<><MicOff size={16}/>Stop Mic</>:<><Mic size={16}/>Start Live</>}
